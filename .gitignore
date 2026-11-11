@@ -1,0 +1,28 @@
+# Entorno de Python del proyecto
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Firmware
+firmware/**/build/
+*.bin
+*.elf
+*.map
+
+# Datos generados (descomenta si NO quieres versionar las calibraciones)
+data/raw/*.csv
+data/models/*.json
+data/models/*.png
+
+# Editores
+.vscode/
+.idea/
+*.swp
+
+# Windows
+Thumbs.db
+desktop.ini

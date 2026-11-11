@@ -1,0 +1,14 @@
+# Dependencias del lado PC.
+#
+# El .venv del proyecto se creo con --system-site-packages, asi que numpy,
+# scipy, matplotlib y pandas se toman del Python global ya instalado y aqui
+# solo hace falta pyserial. Si recreas el entorno SIN --system-site-packages,
+# descomenta el resto o instala todo con:
+#     python -m pip install -r pc/requirements.txt
+
+pyserial>=3.5
+
+# numpy>=1.24
+# scipy>=1.10
+# matplotlib>=3.7
+# pandas>=1.5
