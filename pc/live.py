@@ -71,8 +71,14 @@ def main(argv=None) -> int:
             for i in range(source.n_ch):
                 name = fsr.CHANNELS[i] if i < len(fsr.CHANNELS) else f"ch{i}"
                 m = float(np.mean(mv[i]))
-                ohms = fsr.ohms_from_mv(m)
                 model = models.get(name)
+                hw = model.get("hardware", {}) if model else {}
+                ohms = fsr.ohms_from_mv(
+                    m,
+                    vcc=hw.get("vcc", fsr.VCC_VOLTS),
+                    r_fixed=hw.get("r_fixed", fsr.R_FIXED_OHMS),
+                    fsr_to_vcc=str(hw.get("topologia", "fsr_to_vcc"))
+                    == "fsr_to_vcc")
                 if model is None:
                     parts.append(f"{name:>6}{m:11.1f}{fsr.format_ohms(ohms):>14}"
                                  f"{'--':>11}   (sin modelo)")

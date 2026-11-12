@@ -75,6 +75,9 @@ class FsrSource:
     def __init__(self, n_ch: int = 2, maxlen: int = 20000):
         self.n_ch = n_ch
         self._buf: deque[tuple[float, tuple[int, ...], tuple[float, ...]]] = deque(maxlen=maxlen)
+        # Ultimas lineas CRUDAS (antes de parsear). Sirven para diagnosticar:
+        # si el firmware es el antiguo, aqui se ve el texto tal cual llega.
+        self._raw_lines: deque[str] = deque(maxlen=400)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -106,6 +109,11 @@ class FsrSource:
     def snapshot(self):
         with self._lock:
             return list(self._buf)
+
+    def recent_raw(self) -> list[str]:
+        """Ultimas lineas crudas recibidas (para diagnostico)."""
+        with self._lock:
+            return list(self._raw_lines)
 
     def window(self, seconds: float):
         """Muestras de los ultimos ``seconds`` segundos.
@@ -184,6 +192,7 @@ class SerialSource(FsrSource):
             if not text:
                 continue
             self.last_line = text
+            self._raw_lines.append(text)
             if text.startswith("#"):
                 continue
 
@@ -212,12 +221,14 @@ class SimulatedSource(FsrSource):
 
     def __init__(self, n_ch: int = 2, hz: int = 25, seed: int | None = 1234,
                  vcc: float = fsr.VCC_VOLTS,
-                 r_fixed: float = fsr.R_FIXED_OHMS,
+                 r_fixed=fsr.R_FIXED_OHMS,
                  fsr_to_vcc: bool = True):
         super().__init__(n_ch=n_ch)
         self.hz = hz
         self.vcc = vcc
-        self.r_fixed = r_fixed
+        # Acepta un valor unico o uno por canal (10k || 2k, etc.)
+        r = fsr.parse_r_fixed(r_fixed, n_ch)
+        self.r_fixed = r
         self.fsr_to_vcc = fsr_to_vcc
         self._rng = random.Random(seed)
         # (R a 1000 g, exponente). Dos canales ligeramente distintos para
@@ -245,7 +256,7 @@ class SimulatedSource(FsrSource):
             for ch in range(self.n_ch):
                 r_true = self._r_for(ch, self._weight)
                 v = fsr.volts_from_ohms(r_true, vcc=self.vcc,
-                                        r_fixed=self.r_fixed,
+                                        r_fixed=fsr.r_fixed_for(ch, self.r_fixed),
                                         fsr_to_vcc=self.fsr_to_vcc)
                 # deriva lenta (creep del FSR y estabilidad del riel)
                 self._drift += self._rng.gauss(0.0, 0.02)

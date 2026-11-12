@@ -35,7 +35,11 @@ campaña de medidas.
 ## 1. Materiales
 
 - ESP32 DevKit con el firmware `fsr_stream`.
-- 2 × FSR402 + 2 × resistencia de 10 kΩ (idealmente medida con multímetro).
+- 2 × FSR402.
+- Por cada sensor, una resistencia fija de **1667 Ω**. La forma barata de
+  conseguirla es **10 kΩ en paralelo con 2 kΩ** (`10k ∥ 2k = 1666,7 Ω`).
+  Mide la combinación con el multímetro si quieres precisión; dos resistencias
+  del 5 % en paralelo suelen quedar dentro del 1–2 %.
 - Báscula de cocina de 5 kg (resolución 1 g).
 - **Disco rígido** de ~12–13 mm de diámetro: arandela gruesa, ficha de dominó
   recortada, taco de madera, pieza impresa en 3D. Debe ser plano y no
@@ -52,11 +56,26 @@ campaña de medidas.
    el firmware corriendo. Anótalo. Suele dar 3,25–3,35 V. Ponlo en
    `VCC_VOLTS` del sketch **y** en `--vcc` de `capture.py`. Un error del 2 %
    aquí es un error del 2 % en `R` y por tanto en el modelo.
-2. **Mide las resistencias fijas**. Si una es 9,78 kΩ, usa ese valor.
+2. **Mide las resistencias fijas**. Para cada sensor, mide la combinación
+   `10k ∥ 2k` ya soldada (debería dar ~1,67 kΩ). Usa ese valor real: si mides
+   1710 Ω, pasa `--r-fixed 1710`.
+   - Si solo tienes una resistencia de 2 kΩ, puedes usar **2 kΩ sola** en un
+     sensor. Funciona, pero el techo fiable del ADC baja de 4,5 kg a ~3,8 kg.
+   - **Nunca pongas resistencias en serie** para "subir": `10k + 2k = 12k`
+     empeora el rango. La dirección correcta es siempre bajar `R_fija`.
 3. Comprueba el reposo: en el Monitor Serie, sin tocar el sensor, `mv` debe
    estar cerca de 0 (esta topología). Si marca cientos de mV en reposo, hay
    una vía de corriente parásita o el divisor está invertido.
-4. Comprueba el ruido:
+4. Comprueba el enlace y el ruido. Primero el diagnóstico (no escribe nada):
+
+   ```powershell
+   .\.venv\Scripts\python.exe pc\probe.py --port COM5
+   ```
+
+   Debe decir `VEREDICTO: OK`. Si dice `FIRMWARE ANTIGUO`, sube el sketch. Si
+   dice `PUERTO OCUPADO`, cierra el Monitor Serie del Arduino IDE.
+
+   Después mira el ruido en vivo:
 
    ```powershell
    .\.venv\Scripts\python.exe pc\capture.py --port COM5 --session ruido --hold 2.5
@@ -71,38 +90,77 @@ campaña de medidas.
 
 ## 3. Comprobar el rango antes de calibrar
 
-Con `R_fixed = 10k` y `VCC = 3,3 V`, la tensión del nodo es:
+### 3.1 El problema del ADC
+
+El ADC del ESP32 con atenuación de 11 dB **no es lineal en todo su rango**.
+Espressif solo caracteriza de fábrica la zona aproximada de **150–2450 mV**;
+por debajo de 150 mV la resolución efectiva se degrada y por encima de
+2450 mV la lectura sigue subiendo pero pierde linealidad. El techo físico está
+en ~3,1 V, donde el ADC recorta.
+
+Por eso el objetivo del divisor es que **5 kg caigan por debajo de 2,45 V**.
+Con `VCC = 3,3 V`:
 
 ```
-V = 3,3 · 10k / (10k + R_fsr)
+V_nodo = 3,3 · R_fija / (R_fija + R_fsr)
 ```
 
-Y el ADC del ESP32 solo es fiable hasta ~2,45 V. Valores típicos para un
-FSR402 (los tuyos variarán, esto es solo orientación):
+### 3.2 Por qué 1667 Ω y no 10 kΩ
 
-| Carga (g) | R_fsr típica | V_nodo con 10k | ¿Zona fiable? |
+Con la `10 kΩ` original, un FSR402 típico llega a 2,45 V con solo ~750–1000 g:
+todo lo que pase de ahí se mide mal. Con `10k ∥ 2k = 1666,7 Ω` el mismo sensor
+reparte mejor el rango:
+
+| Carga (g) | R_fsr típica | V_nodo con 1667 Ω | ¿Zona fiable? |
 |---:|---:|---:|:--|
 | 0 | abierto | 0,00 V | sí |
-| 100 | ~38 kΩ | 0,69 V | sí |
-| 300 | ~11 kΩ | 1,56 V | sí |
-| 500 | ~6,4 kΩ | 2,02 V | sí |
-| 750 | ~4,1 kΩ | 2,34 V | al límite |
-| 1000 | ~3,0 kΩ | 2,54 V | **no** |
-| 2000 | ~1,2 kΩ | 2,94 V | **no** |
-| 4000 | ~0,65 kΩ | 3,10 V | saturado |
+| 100 | ~38 kΩ | 0,14 V | sí (justo en el límite bajo) |
+| 300 | ~11 kΩ | 0,42 V | sí |
+| 500 | ~6,4 kΩ | 0,68 V | sí |
+| 750 | ~4,1 kΩ | 0,95 V | sí |
+| 1000 | ~3,0 kΩ | 1,18 V | sí |
+| 2000 | ~1,4 kΩ | 1,79 V | sí |
+| 3000 | ~0,9 kΩ | 2,15 V | sí |
+| 4000 | ~0,65 kΩ | 2,37 V | sí |
+| **5000** | **~0,51 kΩ** | **2,53 V** | **al límite** |
 
-Prueba práctica: aprieta con el disco hasta el máximo que vayas a usar y mira
-si `mv` pasa de 2450. Si pasa, tienes tres opciones:
+Los valores de `R_fsr` son orientativos (ley aproximada
+`R ≈ 3000 · (g/1000)^(-1,1)`); **tu unidad variará**. Lo que importa es la
+tensión, y esa se mide.
 
-| Opción | Efecto |
-|---|---|
-| Calibrar solo hasta donde llega a 2,45 V | Pierdes el rango alto, pero el modelo es honesto |
-| Bajar `R_fixed` a 4,7 kΩ | Sube el techo a ~1,7 kg |
-| Bajar `R_fixed` a 2,2 kΩ | Sube el techo a ~3,5 kg, pero pierdes resolución con cargas pequeñas |
+### 3.3 Comprobación real con `--range-check`
 
-Compromiso: cuanto menor es `R_fixed`, más rango y menos sensibilidad en la
-zona baja. Para "presencia + peso aproximado en 0–5 kg", `2,2 kΩ` es un buen
-punto medio; para 0–1 kg con buena resolución, `10 kΩ` es correcto.
+No confíes en la tabla: mide tu sensor. Pon la carga objetivo (5 kg) y ejecuta:
+
+```powershell
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --range-check --target 5000
+```
+
+Durante 10 s muestra el pico de cada canal y recomienda un valor de `R_fija`:
+
+| Pico medido | Veredicto | Acción |
+|---:|---|---|
+| < 2450 mV | OK | calibra así |
+| 2450–2900 mV | aceptable, pierdes precisión arriba | calibra asumiendo más error en el extremo alto |
+| > 2900 mV | demasiado alto | baja `R_fija` (p. ej. `2k ∥ 2k = 1k`) y repite |
+
+El script calcula `R_fija ≈ 2,3 · R_fsr(5 kg)` como valor recomendado. Si tu
+unidad pide 1 kΩ en vez de 1,67 kΩ, necesitas dos resistencias de 2 kΩ en
+paralelo por sensor. **Cada sensor necesita su propia resistencia.**
+
+### 3.4 Compromiso
+
+Cuanto menor es `R_fija`, más rango pero menos resolución en la zona baja:
+
+| `R_fija` | 5 kg | Zona buena hasta | 100 g |
+|---|---:|---:|---:|
+| 10 kΩ | 3,15 V ❌ | ~0,9 kg | 690 mV |
+| 2 kΩ | 2,67 V | ~3,8 kg | 170 mV |
+| **1,67 kΩ** | **2,53 V** | **~4,5 kg** | **140 mV** |
+| 1 kΩ | 2,24 V ✅ | ~7 kg | 85 mV |
+
+Para 0–5 kg, **1,67 kΩ es el mejor compromiso con una sola 2 kΩ por sensor**.
+Si tu `--range-check` sale por encima de 2,45 V, pasa a 1 kΩ.
 
 ---
 
@@ -125,13 +183,16 @@ punto medio; para 0–1 kg con buena resolución, `10 kΩ` es correcto.
 
 ### 5.1 Puntos
 
-Para un rango útil de 0–2 kg:
+Para un rango de 0–5 kg con `R_fija = 1667 Ω`:
 
 ```
-0, 50, 100, 200, 300, 500, 750, 1000, 1500, 2000 g
+0, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000 g
 ```
 
-Si tu rango útil llega a 4 kg, añade `3000` y `4000`.
+Los primeros 100 g caen muy abajo (~140 mV), así que no añadas puntos por
+debajo salvo que te interese esa zona. El punto de 5000 g está cerca del techo
+fiable: si `--range-check` lo deja por encima de 2450 mV, marca los puntos
+altos como "informativos" o pasa a 1 kΩ.
 
 - **0 g** se captura en reposo (sin tocar). No entra en el ajuste logarítmico,
   pero es tu referencia de offset y sirve para verificar que no hay señal
@@ -154,8 +215,9 @@ Si tu rango útil llega a 4 kg, añade `3000` y `4000`.
 ### 5.3 Barrido guiado (recomendado)
 
 ```powershell
-.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr_lote1 `
-    --sweep 0,50,100,200,300,500,750,1000,1500,2000 --reps 2 --hold 2.0
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg `
+    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
+    --reps 2 --hold 2.0 --r-fixed 1667
 ```
 
 El script espera a que la desviación baje de 3 mV en 1 s. Si no lo consigue en
@@ -167,7 +229,7 @@ El script espera a que la desviación baje de 3 mV en 1 s. Si no lo consigue en
 Repite el barrido **de bajada** en una sesión distinta:
 
 ```powershell
---session fsr_lote1_bajada --sweep 2000,1500,1000,750,500,300,200,100,50
+--session fsr5kg_bajada --sweep 5000,4000,3000,2000,1500,1000,750,500,300,200,100
 ```
 
 Ajusta las dos sesiones por separado y compara. La diferencia entre ambas
@@ -191,7 +253,8 @@ El CSV (`data/raw/<sesion>.csv`) guarda por punto:
 
 Las cabeceras `# vcc=`, `# r_fixed=` y `# topologia=` quedan grabadas en el
 propio archivo: el ajuste usa esos valores, no los de por defecto. Así un CSV
-antiguo sigue siendo reproducible.
+antiguo sigue siendo reproducible. `r_fixed` puede ser un valor por canal
+(`1667/10000`): cada fila se convierte con el de su sensor.
 
 Anota aparte (cuaderno): fecha, temperatura ambiente, si cambiaste el disco,
 y cualquier golpe o doblez del sensor durante la sesión.
@@ -200,8 +263,11 @@ y cualquier golpe o doblez del sensor durante la sesión.
 
 ## 7. Análisis
 
+La referencia completa de cada opción está en
+[`docs/guia_scripts.md`](guia_scripts.md). El comando básico:
+
 ```powershell
-.\.venv\Scripts\python.exe pc\fit.py --csv data\raw\fsr_lote1.csv --show
+.\.venv\Scripts\python.exe pc\fit.py --csv data\raw\fsr5kg.csv --show
 ```
 
 Qué mirar, en este orden:
@@ -259,7 +325,46 @@ LOOCV está dentro del criterio. `fit.py` ya genera `calibration.h` con M1.
 
 ---
 
-## 10. Siguiente paso en tu proyecto
+## 10. Guion completo de una sesión (0 → 5 kg)
+
+Resumen de extremo a extremo, con los comandos en orden:
+
+```powershell
+# 1. Entorno
+.\.venv\Scripts\python.exe pc\selftest.py
+
+# 2. Flashear firmware/fsr_stream/fsr_stream.ino en el Arduino IDE (115200)
+# 3. Comprobar que el enlace responde
+.\.venv\Scripts\python.exe pc\probe.py --port COM5
+
+# 4. Decidir la resistencia con la carga real de 5 kg
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --range-check --target 5000
+
+# 5. Capturar el barrido (2 repeticiones por peso)
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg `
+    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
+    --reps 2 --hold 2.0 --r-fixed 1667
+
+# 6. Ajustar y evaluar
+.\.venv\Scripts\python.exe pc\fit.py --csv data\raw\fsr5kg.csv --show
+
+# 7. Validar con un peso conocido
+.\.venv\Scripts\python.exe pc\live.py --port COM5 --models data\models
+```
+
+Si un sensor lleva una resistencia distinta (por ejemplo, solo tienes una 2 kΩ
+y el otro sigue con 10 kΩ), pasa los dos valores:
+
+```powershell
+--r-fixed 1667,10000
+```
+
+El CSV guarda ese `1667/10000`, y `fit.py` lo recupera solo: no tienes que
+repetir la opción al ajustar.
+
+---
+
+## 11. Siguiente paso en tu proyecto
 
 Con `data/models/*.json` ya tienes `A` y `B` por sensor. Dos caminos:
 
@@ -267,7 +372,7 @@ Con `data/models/*.json` ya tienes `A` y `B` por sensor. Dos caminos:
 - **En el ESP32**: incluye `firmware/fsr_stream/calibration.h` y añade
 
   ```cpp
-  float ohms = CAL_R_FIXED_OHMS * (CAL_VCC_VOLTS - v) / v;
+  float ohms = CAL_R_FIXED_OHMS[i] * (CAL_VCC_VOLTS - v) / v;
   float gramos = CAL_A[i] * powf(ohms, CAL_B[i]);
   ```
 

@@ -62,11 +62,27 @@ def load_capture(path: Path) -> tuple[pd.DataFrame, dict[str, str]]:
     return df, meta
 
 
-def add_resistance(df: pd.DataFrame, vcc: float, r_fixed: float,
+def add_resistance(df: pd.DataFrame, vcc: float, r_fixed,
                    fsr_to_vcc: bool) -> pd.DataFrame:
+    """Convierte mV -> ohmios usando la R_fija de CADA canal.
+
+    ``r_fixed`` puede ser un numero o una lista (p. ej. 1667 para S3 y 10000
+    para S4). El CSV trae la columna ``ch`` y de ahi se elige el valor.
+    """
     df = df.copy()
-    df["ohms"] = fsr.ohms_from_mv(df["mv_mean"].to_numpy(),
-                                  vcc=vcc, r_fixed=r_fixed, fsr_to_vcc=fsr_to_vcc)
+    mv = df["mv_mean"].to_numpy(dtype=float)
+    if "ch" in df.columns:
+        ch = df["ch"].fillna(0).to_numpy(dtype=int)
+    else:
+        ch = np.zeros(len(df), dtype=int)
+
+    ohms = np.empty(len(df), dtype=float)
+    for i in np.unique(ch):
+        mask = ch == i
+        ohms[mask] = fsr.ohms_from_mv(
+            mv[mask], vcc=vcc, r_fixed=fsr.r_fixed_for(int(i), r_fixed),
+            fsr_to_vcc=fsr_to_vcc)
+    df["ohms"] = ohms
     return df
 
 
@@ -264,19 +280,25 @@ def plot_channel(agg: pd.DataFrame, fits: list[dict], best: dict,
 # ---------------------------------------------------------------------------
 
 def write_calibration_header(models: list[dict], path: Path,
-                             vcc: float, r_fixed: float, fsr_to_vcc: bool) -> None:
+                             vcc: float, r_fixed, fsr_to_vcc: bool) -> None:
+    n_ch = max(int(m.get("ch", i)) for i, m in enumerate(models)) + 1
+    by_ch = {int(m.get("ch", i)): m for i, m in enumerate(models)}
+    r_vals = [fsr.r_fixed_for(i, r_fixed)
+              if i in by_ch else float("nan") for i in range(n_ch)]
     lines = [
         "/* Generado automaticamente por pc/fit.py. NO EDITAR A MANO. */",
         f"/* Fecha: {_dt.datetime.now().isoformat(timespec='seconds')} */",
         "/*",
         "   Uso en el firmware:",
-        "     ohms = CAL_R_FIXED * (CAL_VCC - v) / v      (topologia fsr_to_vcc)",
+        "     ohms   = CAL_R_FIXED_OHMS[i] * (CAL_VCC - v) / v   (fsr_to_vcc)",
         "     gramos = CAL_A[i] * powf(ohms, CAL_B[i]);",
+        "   Cada canal puede usar una resistencia fija distinta.",
         "*/",
         "#pragma once",
         "",
-        f"#define CAL_N_CH {len(models)}",
-        f"static const float CAL_R_FIXED_OHMS = {r_fixed:.1f}f;",
+        f"#define CAL_N_CH {n_ch}",
+        "static const float CAL_R_FIXED_OHMS[CAL_N_CH] = { "
+        + ", ".join(f"{v:.1f}f" for v in r_vals) + " };",
         f"static const float CAL_VCC_VOLTS    = {vcc:.3f}f;",
         f"static const bool  CAL_FSR_TO_VCC   = {'true' if fsr_to_vcc else 'false'};",
         "",
@@ -320,7 +342,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--csv", required=True, help="CSV generado por capture.py")
     p.add_argument("--out-dir", default=str(fsr.DATA_MODELS))
     p.add_argument("--vcc", type=float, help="sobrescribe el VCC del CSV")
-    p.add_argument("--r-fixed", type=float, help="sobrescribe R_fixed del CSV")
+    p.add_argument("--r-fixed",
+                   help="sobrescribe R_fixed del CSV; acepta un valor por canal: "
+                        "1667,10000")
     p.add_argument("--topology", choices=["fsr_to_vcc", "fsr_to_gnd"],
                    help="sobrescribe la topologia del CSV")
     p.add_argument("--model", choices=["auto", "power_law", "quad_log", "interp"],
@@ -344,8 +368,13 @@ def main(argv=None) -> int:
         raise SystemExit("el CSV no tiene datos")
 
     vcc = args.vcc if args.vcc is not None else float(meta.get("vcc", fsr.VCC_VOLTS))
-    r_fixed = args.r_fixed if args.r_fixed is not None else float(
-        meta.get("r_fixed", fsr.R_FIXED_OHMS))
+    n_ch = int(df["ch"].nunique()) if "ch" in df.columns else len(fsr.CHANNELS)
+    raw_r = args.r_fixed if args.r_fixed is not None else meta.get(
+        "r_fixed", fsr.R_FIXED_OHMS)
+    try:
+        r_fixed = fsr.parse_r_fixed(raw_r, max(n_ch, 1))
+    except ValueError as exc:
+        raise SystemExit(f"ERROR en --r-fixed: {exc}")
     topo = args.topology or meta.get("topologia", fsr.topology_name())
     fsr_to_vcc = fsr.parse_topology(topo)
 
@@ -355,7 +384,8 @@ def main(argv=None) -> int:
     print("=" * 74)
     print(f"  AJUSTE DE CALIBRACION  -  {csv_path.name}")
     print("=" * 74)
-    print(f"  divisor : R_fixed={r_fixed:.0f} ohm  VCC={vcc:.3f} V  ({topo})")
+    print(f"  divisor : R_fixed={fsr.format_r_fixed(r_fixed)} ohm  "
+          f"VCC={vcc:.3f} V  ({topo})")
     print(f"  filas   : {len(df)}")
     if meta.get("creado"):
         print(f"  creado  : {meta['creado']}")
@@ -383,6 +413,7 @@ def main(argv=None) -> int:
     models_out: list[dict] = []
 
     for ch, sub in df.groupby("ch"):
+        rf_ch = fsr.r_fixed_for(int(ch), r_fixed)
         agg = aggregate(sub)
         name = str(agg["nombre"].iloc[0])
         fit_rows = agg[(agg["gramos"] > 0) & np.isfinite(agg["ohms"])]
@@ -442,7 +473,7 @@ def main(argv=None) -> int:
             "nombre": name,
             "model": best["model"],
             "params": best["params"],
-            "hardware": {"vcc": vcc, "r_fixed": r_fixed, "topologia": topo},
+            "hardware": {"vcc": vcc, "r_fixed": rf_ch, "topologia": topo},
             "metrics": {
                 "rmse_g": best["metrics"]["rmse_g"],
                 "r2": best["metrics"]["r2"],
@@ -468,7 +499,7 @@ def main(argv=None) -> int:
         print(f"  modelo  -> {json_path}")
 
         png_path = out_dir / f"{csv_path.stem}_{name}.png"
-        plot_channel(fit_rows, fits, best, png_path, vcc, r_fixed, fsr_to_vcc,
+        plot_channel(fit_rows, fits, best, png_path, vcc, rf_ch, fsr_to_vcc,
                      show=args.show, resid_model=m1)
         print(f"  grafica -> {png_path}")
         print()

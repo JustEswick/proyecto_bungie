@@ -7,14 +7,19 @@ reales.
 Pensado para el montaje:
 
 ```
-        3V3 ──[ FSR402 ]──┬──[ R 10k ]── GND
+        3V3 ──[ FSR402 ]──┬──[ R 1667 Ω ]── GND
                           │
                           ├── GPIO35   (S3)
                           └── GPIO34   (S4)
 ```
 
-Al presionar, la resistencia del FSR baja y la tensión del nodo sube:
-`R_fsr = 10k · (VCC − V_nodo) / V_nodo`.
+`R 1667 Ω` se consigue con **10 kΩ en paralelo con 2 kΩ**. Al presionar, la
+resistencia del FSR baja y la tensión del nodo sube:
+`R_fsr = 1667 · (VCC − V_nodo) / V_nodo`.
+
+Ese valor es el que permite llegar a **5 kg** sin que el ADC del ESP32 entre en
+la zona no caracterizada (por encima de ~2,45 V). Con la 10 kΩ original, 5 kg
+recortaba en ~3,15 V.
 
 ---
 
@@ -28,15 +33,21 @@ proyecto_bungie/
 ├─ pc/
 │  ├─ fsr.py                constantes del divisor y conversiones V <-> ohmios
 │  ├─ link.py               puerto serie + simulador (misma interfaz)
-│  ├─ capture.py            toma de puntos (gramos + mV promediados)
+│  ├─ diagnose.py           clasifica lo que llega por el puerto
+│  ├─ probe.py              diagnóstico del enlace serie
+│  ├─ capture.py            toma de puntos y --range-check
 │  ├─ fit.py                ajuste de modelos, métricas y gráficas
 │  ├─ model.py              modelos en JSON y evaluación
 │  ├─ live.py               monitor en vivo en gramos
 │  └─ selftest.py           autocomprobación del entorno (sin hardware)
 ├─ data/raw/                CSV de cada sesión de calibración
 ├─ data/models/             JSON + PNG de diagnóstico
-└─ docs/procedimiento_calibracion.md
+└─ docs/
+   ├─ procedimiento_calibracion.md   protocolo mecánico y físico
+   └─ guia_scripts.md                referencia de cada script y sus opciones
 ```
+
+Guía de referencia rápida: [`docs/guia_scripts.md`](docs/guia_scripts.md).
 
 El `.venv` ya está creado con `--system-site-packages`: ve `numpy`, `scipy`,
 `matplotlib` y `pandas` de tu Python global, y solo tiene instalado `pyserial`
@@ -93,7 +104,7 @@ Debe terminar con `Todo correcto: el entorno esta listo para calibrar.`
 5. Abre el *Serial Monitor* a **115200** baudios. Debes ver:
 
 ```
-# ch0=S3 ch1=S4 r_fixed=10000.00 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
+# ch0=S3 ch1=S4 r_fixed=1666.70 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
 # ms,raw0,mv0,raw1,mv1
 12345,1534,1234.5,1480,1190.2
 12385,1536,1235.1,1479,1190.0
@@ -113,7 +124,7 @@ Debe terminar con `Todo correcto: el entorno esta listo para calibrar.`
 | Constante | Qué es | Cuándo cambiarla |
 |---|---|---|
 | `VCC_VOLTS` | tensión real del pin 3V3 | **Mídela con multímetro**; si no, el modelo arrastra un error de escala |
-| `R_FIXED_OHMS` | resistencia fija real | Si mides 9.8k en vez de 10k |
+| `R_FIXED_OHMS` | resistencia fija real | Si mides 1710 Ω en vez de 1667 Ω |
 | `FSR_TO_VCC` | orientación del divisor | Solo si cambias el cableado |
 | `OVERSAMPLE` | lecturas por muestra | Subir si hay mucho ruido |
 | `REPORT_HZ` | líneas por segundo | 25 va sobrado |
@@ -138,39 +149,63 @@ gramos.
 Con datos sintéticos el ajuste debe recuperar la ley oculta con RMSE de pocos
 gramos. Si esto funciona, la cadena está bien.
 
-### 4.2 Con la placa
+### 4.2 Con la placa: primero el diagnóstico
+
+Cierra el Monitor Serie del Arduino IDE (ocupa el puerto) y comprueba el
+enlace:
 
 ```powershell
-.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr_lote1
+.\.venv\Scripts\python.exe pc\probe.py --port COM5
+```
+
+Debe decir `VEREDICTO: OK`. Si dice `FIRMWARE ANTIGUO`, sube el sketch. Si dice
+`PUERTO OCUPADO`, cierra el monitor.
+
+Después decide la resistencia midiendo el pico con la carga real de 5 kg:
+
+```powershell
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --range-check --target 5000
+```
+
+Si el pico pasa de 2450 mV, baja `R_fija` (por ejemplo a `1k`) y repite.
+
+### 4.3 Captura interactiva
+
+```powershell
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg
 ```
 
 Flujo en el prompt:
 
 ```
-  lectura actual (ventana 1.5 s):
-    S3  mv=  412.3 +/-  1.9  R=    23.9 kohm  n=37
-    S4  mv=  398.0 +/-  2.2  R=    25.1 kohm  n=37
-  gramos > 1000
+  Lectura en vivo (ventana 3 s):
+    S3  mv=   412.3 +/-  1.9  R=    11.7 kohm  n=75
+    S4  mv=   398.0 +/-  2.2  R=    12.2 kohm  n=75
+  gramos en la bascula >
 ```
 
 1. Apoya el sensor en la báscula con el **disco rígido** encima y tara a 0.
 2. Presiona hasta que la báscula marque un peso estable.
 3. Escribe el número y pulsa ENTER **mientras sigues presionando**: el programa
-   promedia la ventana de 1.5 s anterior al ENTER.
+   promedia la ventana anterior al ENTER y te pide confirmación `[S/n/r]`.
 4. ENTER en vacío solo **refresca** la lectura, no guarda nada.
 
 Comandos: `u` deshacer último punto · `l` listar · `q` salir.
 
-### 4.3 Barrido guiado (recomendado para la sesión buena)
+### 4.4 Barrido guiado (recomendado para la sesión buena)
 
 ```powershell
-.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr_lote1 `
-    --sweep 0,50,100,200,300,500,750,1000,1500,2000,3000,4000 --reps 2
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg `
+    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
+    --reps 2 --hold 2.0 --r-fixed 1667
 ```
 
 Espera a que la señal sea estable (desviación ≤ 3 mV durante 1 s) antes de
-capturar, así no dependes de tu pulso. Ver
-`docs/procedimiento_calibracion.md` para el protocolo completo.
+capturar, así no dependes de tu pulso. Para el protocolo completo, la elección
+de `R_fija` y la interpretación de las gráficas, ver
+[`docs/procedimiento_calibracion.md`](docs/procedimiento_calibracion.md).
+Todas las opciones de cada script están en
+[`docs/guia_scripts.md`](docs/guia_scripts.md).
 
 ---
 
@@ -209,7 +244,11 @@ Opciones útiles:
 --drop-saturated     # descarta puntos por encima de 2.45 V y compara
 --model power_law    # fuerza el modelo embebible
 --vcc 3.28           # si mides otra tensión de riel
+--r-fixed 1667,10000 # si los dos canales usan resistencias distintas
 ```
+
+El CSV guarda su propio `vcc`, `r_fixed` y topología, así que `fit.py` los
+recupera sin que tengas que repetirlos.
 
 ---
 
@@ -247,18 +286,27 @@ una célula de carga + HX711.
 | `No encontre la placa ESP32` | Driver CH340/CP210x sin instalar, o cable solo de carga. Prueba `--port COM5` explícito. |
 | Todas las lecturas a 0 mV | Divisor mal cableado o GND no común. Con esta topología, en reposo el nodo debe estar cerca de 0 V y subir al presionar. |
 | Lecturas ~3300 mV siempre | FSR o R fija en corto, o el nodo está midiendo el riel. |
-| mV > 2450 con carga alta | Zona no caracterizada del ADC. Calibra solo hasta ahí, o baja `R_FIXED` a 4.7k y recalibra. |
+| mV > 2450 con carga alta | Zona no caracterizada del ADC. Ejecuta `--range-check --target 5000`; si pasa de 2450, baja `R_fija` (p. ej. `1k`) y recalibra con sesión nueva. |
 | Mucho ruido (±20 mV) | Cables largos. Añade 100 nF entre el nodo y GND; sube `OVERSAMPLE`; usa `--hold 2.5`. |
 | El ajuste da RMSE enorme | Mezclaste puntos con el sensor sin apoyar bien, o cambió el área de contacto. Mira el PNG de residuales: un punto desviado se ve a simple vista. |
 | `ya existe con vcc=... y ahora usas ...` | El CSV es de otra configuración. Usa otra `--session`. |
 
 ---
 
-## 9. Nota sobre el rango
+## 9. Nota sobre el rango 0–5 kg
 
-Con `3V3 → FSR → 10k → GND`, un FSR402 a ~1 kg baja a ~3 kΩ y el nodo ya está
-en ~2.5 V, el techo fiable del ADC del ESP32. Para cargas mayores la lectura se
-comprime y el modelo pierde precisión arriba. Si tu rango de interés es
-0–2 kg, el montaje actual está bien; si necesitas 0–5 kg lineales, cambia la
-resistencia fija a 4.7 kΩ y vuelve a calibrar. `fit.py` te avisa con `[!]`
-cuando detecta puntos en esa zona.
+Con `3V3 → FSR → 10k → GND`, un FSR402 a ~1 kg ya está en ~2,5 V, el techo
+fiable del ADC del ESP32: con la 10 kΩ original **5 kg recorta** (~3,15 V).
+
+Por eso el montaje por defecto usa **1667 Ω = 10 kΩ ∥ 2 kΩ**:
+
+| `R_fija` | V a 5 kg | Zona fiable hasta | V a 100 g |
+|---|---:|---:|---:|
+| 10 kΩ | 3,15 V ❌ | ~0,9 kg | 690 mV |
+| 2 kΩ | 2,67 V | ~3,8 kg | 170 mV |
+| **1,67 kΩ** | **2,53 V** | **~4,5 kg** | **140 mV** |
+| 1 kΩ | 2,24 V ✅ | ~7 kg | 85 mV |
+
+La tabla usa un FSR402 típico; tu unidad variará. Decide con
+`--range-check --target 5000` y no con la tabla. `fit.py` te avisa con `[!]`
+cuando detecta puntos por encima de 2450 mV.

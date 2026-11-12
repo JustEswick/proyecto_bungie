@@ -28,7 +28,12 @@ FIRMWARE_DIR = ROOT / "firmware" / "fsr_stream"
 # ---------------------------------------------------------------- hardware
 # Mide estos dos valores con el multimetro. Un 5 % de error en VCC se
 # traduce en un error notable en la resistencia calculada.
-R_FIXED_OHMS = 10000.0
+#
+# R_FIXED = 1666.7 ohm  ->  una resistencia de 10k en paralelo con una de 2k.
+# Es el valor recomendado para llegar a 5 kg sin que el ADC recorte:
+#   V(5 kg) ~ 2.57 V, dentro del techo fiable de 2.45-3.10 V.
+# Si usas otro valor, cambialo aqui (y en el sketch, solo informativo).
+R_FIXED_OHMS = 1666.7
 VCC_VOLTS = 3.30
 FSR_TO_VCC = True
 
@@ -54,6 +59,61 @@ def parse_topology(text: str) -> bool:
     if t in ("fsr_to_gnd", "gnd", "fsr-abajo", "abajo"):
         return False
     raise ValueError(f"topologia desconocida: {text!r}")
+
+
+def parse_r_fixed(value, n_ch: int | None = None) -> float | list[float]:
+    """Acepta un valor unico o una lista separada por comas.
+
+    Con una lista se asigna un valor por canal, en el mismo orden que el
+    firmware (S3, S4):  --r-fixed 1667,10000
+
+    Puede venir de argparse (str), de un CSV (str) o ya como numero/lista.
+    """
+    if value is None:
+        value = R_FIXED_OHMS
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, (list, tuple)):
+        vals = [float(v) for v in value]
+    else:
+        text = str(value).strip()
+        if not text:
+            return float(R_FIXED_OHMS)
+        # Acepta "1667,10000", "1667;10000" y "1667/10000" (formato del CSV).
+        parts = [p for p in text.replace(";", ",").replace("/", ",").split(",")
+                 if p.strip()]
+        vals = []
+        for p in parts:
+            token = p.strip().lower().replace("ohm", "").replace("Ω", "")
+            if token.endswith("k"):
+                vals.append(float(token[:-1]) * 1000.0)
+            else:
+                vals.append(float(token))
+
+    if len(vals) == 1:
+        return vals[0]
+    if n_ch is not None and len(vals) != n_ch:
+        raise ValueError(
+            f"--r-fixed tiene {len(vals)} valores pero hay {n_ch} canales")
+    return vals
+
+
+def r_fixed_for(ch: int, r_fixed=None) -> float:
+    """Resistencia fija efectiva de un canal concreto."""
+    if r_fixed is None:
+        r_fixed = R_FIXED_OHMS
+    if isinstance(r_fixed, (list, tuple)):
+        return float(r_fixed[ch % len(r_fixed)])
+    return float(r_fixed)
+
+
+def format_r_fixed(r_fixed) -> str:
+    """'1667' o '1667/10000' para cabeceras y mensajes."""
+    if isinstance(r_fixed, (list, tuple)):
+        return "/".join(f"{float(v):.0f}" for v in r_fixed)
+    return f"{float(r_fixed):.0f}"
 
 
 def ohms_from_volts(volts, *, vcc: float = VCC_VOLTS,

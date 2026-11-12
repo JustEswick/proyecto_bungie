@@ -4,9 +4,12 @@
    Proyecto: calibracion de FSR contra bascula (gramos).
 
    CONEXIONES (topologia "FSR arriba"):
-       3V3 --- [ FSR ] ---+--- [ R_FIXED 10k ] --- GND
+       3V3 --- [ FSR ] ---+--- [ R_FIXED ] --- GND
                           |
                         GPIO (ADC)
+
+     R_FIXED = 1666.7 ohm (10k en paralelo con 2k) para llegar a 5 kg sin
+     que el ADC recorte. Si usas otro valor, cambia R_FIXED_OHMS mas abajo.
 
      Al presionar, R_FSR baja  ->  V_nodo SUBE.
      R_FSR = R_FIXED * (VCC - V_nodo) / V_nodo
@@ -22,7 +25,7 @@
      resistencias pull-up ni salidas digitales).
 
    SALIDA (115200 baudios, CSV plano, 25 Hz):
-       # ch0=S3 ch1=S4 r_fixed=10000.00 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
+       # ch0=S3 ch1=S4 r_fixed=1666.70 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
        # ms,raw0,mv0,raw1,mv1
        12345,1534,1234.5,1480,1190.2
        ...
@@ -49,8 +52,10 @@ static const uint8_t PIN_ADC[N_CH] = { 35, 34 };          // S3, S4
 static const char*   CH_NAME[N_CH] = { "S3", "S4" };
 
 // Resistencia fija del divisor, en ohmios. Mide la tuya con el multimetro
-// si quieres precision (10k nominal suele medir 9.8k..10.2k).
-static const float R_FIXED_OHMS = 10000.0f;
+// si quieres precision. 1666.7 = 10k || 2k: 5 kg cae en ~2.57 V, dentro de
+// la zona fiable del ADC. Solo es informativo: la conversion real la hace
+// el PC con --r-fixed.
+static const float R_FIXED_OHMS = 1666.7f;
 
 // Voltaje real del riel de 3V3, medido con multimetro.
 // OJO: no pongas 3.30 "porque si". Mide el pin 3V3 de la placa con el USB
@@ -126,6 +131,7 @@ static void print_header() {
 // analogReadMilliVolts() usa la curva de calibracion que Espressif graba en
 // la eFuse de cada ESP32. Es bastante mejor que hacer raw*3300/4095, sobre
 // todo cerca de los extremos del rango.
+
 static void read_burst(uint8_t pin, float& raw_avg, float& mv_avg) {
   uint32_t raw_sum = 0;
   uint32_t mv_sum  = 0;

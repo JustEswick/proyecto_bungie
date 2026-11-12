@@ -80,11 +80,24 @@ def test_simulator() -> None:
     check("genera muestras a 25 Hz", ok,
           f"{[len(x) for x in mv]} muestras por canal")
     means = [float(np.mean(x)) for x in mv] if ok else [0, 0]
-    check("1000 g -> nodo en zona alta", all(2000 < m < 3100 for m in means),
+    check("1000 g -> nodo en zona util", all(700 < m < 2000 for m in means),
           f"{means[0]:.0f} / {means[1]:.0f} mV")
     sd = [float(np.std(x)) for x in mv] if ok else [99, 99]
     check("ruido bajo", all(s < 10 for s in sd),
           f"{sd[0]:.2f} / {sd[1]:.2f} mV")
+
+    # Con R_fija = 1667 ohm, 5 kg debe quedar en la parte alta pero sin recortar
+    # (el techo fiable es 2.45 V; 5 kg puede quedar justo por encima en algunas
+    # unidades, de ahi el margen hasta 2.9 V).
+    src = SimulatedSource(n_ch=2).start()
+    src.set_weight(5000.0)
+    time.sleep(1.6)
+    mv5, _ = src.channels_window(1.0)
+    src.stop()
+    means5 = [float(np.mean(x)) for x in mv5] if mv5 else [0, 0]
+    check("5000 g -> medible sin recortar (< 2.9 V)",
+          all(1800 < m < 2900 for m in means5),
+          f"{means5[0]:.0f} / {means5[1]:.0f} mV")
 
 
 def test_fit_recovers_law() -> None:
