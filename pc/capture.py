@@ -10,7 +10,9 @@ Dos modos:
       mirar la senal mientras buscas el peso.
 
   BARRIDO  (--sweep)
-      Recorre una lista de pesos. Para cada uno espera a que la senal sea
+      Recorre una lista de pesos. Antes de cada punto hace una pausa
+      (`--pause`, 10 s por defecto) para que te de tiempo a quitar la carga
+      anterior y aplicar la siguiente. Despues espera a que la senal sea
       estable y captura solo, sin escribir nada. Ideal para una sesion buena.
 
 Uso:
@@ -142,6 +144,40 @@ def _warn_saturation(mv_mean: float, name: str) -> None:
               f"Zona NO caracterizada del ADC (posible saturacion).")
     elif mv_mean > fsr.ADC_MAX_V * 1000.0 * 0.985:
         print(f"  [!] {name}: {mv_mean:.0f} mV, practicamente en el techo del ADC.")
+
+
+def _countdown(seconds: float) -> None:
+    """Cuenta atras por consola; ENTER la termina antes (solo Windows)."""
+    if seconds <= 0:
+        return
+    msvcrt = None
+    try:
+        import msvcrt  # Windows: permite saltar con ENTER
+    except ImportError:
+        pass
+    end = time.monotonic() + seconds
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            break
+        sys.stdout.write(f"\r      esperando... {left:4.1f} s   "
+                         f"(ENTER para medir ya)   ")
+        sys.stdout.flush()
+        if msvcrt is not None and msvcrt.kbhit():
+            if msvcrt.getwch() in ("\r", "\n"):
+                break
+        time.sleep(0.1)
+    sys.stdout.write("\r" + " " * 66 + "\r")
+    sys.stdout.flush()
+
+
+def _pause_before_point(grams: float, seconds: float) -> None:
+    """Da tiempo a quitar la carga anterior y aplicar la del punto actual."""
+    if seconds <= 0:
+        return
+    accion = "quita la carga" if grams <= 0 else f"aplica {grams:g} g"
+    print(f"      preparate: {accion} y mantenlo.")
+    _countdown(seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="voltaje real del riel 3V3 (mideal con multimetro)")
     p.add_argument("--r-fixed", default=str(fsr.R_FIXED_OHMS),
                    help="resistencia fija en ohmios; acepta un valor por canal: "
-                        "1667,10000")
+                        "1633,1641")
     p.add_argument("--topology", choices=["fsr_to_vcc", "fsr_to_gnd"],
                    default=fsr.topology_name(), help="orientacion del divisor")
     p.add_argument("--simulate", action="store_true",
@@ -437,6 +473,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="capturas por peso en modo --sweep")
     p.add_argument("--settle", type=float, default=1.0,
                    help="espera tras aplicar el peso antes de capturar")
+    p.add_argument("--pause", type=float, default=10.0,
+                   help="pausa antes de cada punto de --sweep, en segundos, "
+                        "para quitar/aplicar la carga (0 = sin pausa)")
     p.add_argument("--stab-window", type=float, default=1.0,
                    help="ventana para medir la estabilidad")
     p.add_argument("--stab-mv", type=float, default=3.0,
@@ -497,6 +536,7 @@ def main(argv=None) -> int:
     print()
     print("  Recuerda: disco rigido del mismo diametro que el pad activo del FSR,")
     print("  siempre en el mismo sitio, y tara la bascula con el disco encima.")
+    print("  Se guardan los dos canales; el que no cargues se omite en fit.py.")
     print()
 
     source.start()
@@ -537,6 +577,9 @@ def _run_sweep(sess: CaptureSession, args, source: FsrSource) -> None:
     total = len(targets) * args.reps
     print(f"  Modo barrido: {len(targets)} pesos x {args.reps} repeticiones "
           f"({total} puntos)")
+    if args.pause > 0 and not isinstance(source, SimulatedSource):
+        print(f"  Antes de cada punto: {args.pause:g} s para quitar/aplicar la "
+              f"carga (ENTER salta la espera).")
     print("  Para cada peso: aplicalo, mantenlo y espera. Se captura solo.")
     done = 0
     for grams in targets:
@@ -549,6 +592,7 @@ def _run_sweep(sess: CaptureSession, args, source: FsrSource) -> None:
                 time.sleep(max(args.settle, 0.8) + 0.5)
                 stable = True
             else:
+                _pause_before_point(grams, args.pause)
                 stable = sess._wait_stable()
                 time.sleep(0.2)
             if not stable:

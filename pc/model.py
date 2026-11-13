@@ -8,7 +8,7 @@ Un modelo guardado tiene esta forma (ver data/models/*.json):
       "nombre": "S3",
       "model": "power_law",              # power_law | quad_log | interp
       "params": {"A": 1.2e6, "B": -1.83},
-      "hardware": {"vcc": 3.30, "r_fixed": 10000.0, "topologia": "fsr_to_vcc"},
+      "hardware": {"vcc": 3.27, "r_fixed": 1637.0, "topologia": "fsr_to_vcc"},
       "metrics": {"rmse_g": 12.4, "r2": 0.9991, "max_abs_g": 31.0,
                   "loocv_rmse_g": 15.2},
       "n_points": 11,

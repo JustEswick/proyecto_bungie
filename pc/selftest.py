@@ -11,8 +11,12 @@ No necesita hardware. Verifica:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import math
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -86,7 +90,7 @@ def test_simulator() -> None:
     check("ruido bajo", all(s < 10 for s in sd),
           f"{sd[0]:.2f} / {sd[1]:.2f} mV")
 
-    # Con R_fija = 1667 ohm, 5 kg debe quedar en la parte alta pero sin recortar
+    # Con R_fija = 1637 ohm, 5 kg debe quedar en la parte alta pero sin recortar
     # (el techo fiable es 2.45 V; 5 kg puede quedar justo por encima en algunas
     # unidades, de ahi el margen hasta 2.9 V).
     src = SimulatedSource(n_ch=2).start()
@@ -122,8 +126,79 @@ def test_fit_recovers_law() -> None:
     check("prediccion coherente", np.allclose(pred, grams, rtol=0.05))
 
 
+def _write_capture(path: Path, rows: list[str]) -> None:
+    header = [
+        "# calibracion FSR - puntos de referencia",
+        "# vcc=3.27",
+        "# r_fixed=1633/1641",
+        "# topologia=fsr_to_vcc",
+        "# canales=S3,S4",
+        "# creado=2026-11-12T18:00:00",
+        "timestamp,session,ch,nombre,gramos,mv_mean,mv_std,raw_mean,raw_std,n",
+    ]
+    path.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
+
+
+def test_fit_channel_selection() -> None:
+    """Un canal en reposo no debe generar un modelo de calibracion."""
+    print("\n5. Seleccion de canales en el ajuste")
+    tmp = Path(tempfile.mkdtemp(prefix="fsr_selftest_"))
+    try:
+        # S3 con senal realista; S4 en reposo (~1 mV): solo debe ajustarse S3.
+        rows = []
+        signal = [(100, 135.0), (500, 660.0), (1000, 1150.0),
+                  (2000, 1762.0), (3000, 2117.0), (4000, 2345.0),
+                  (5000, 2501.0)]
+        for i, (g, mv) in enumerate(signal):
+            rows.append(f"2026-11-12T18:00:{i:02d},uno,0,S3,{g}.0,{mv},1.0,1,1.0,75")
+            rows.append(f"2026-11-12T18:00:{i:02d},uno,1,S4,{g}.0,0.9,0.8,1,0.9,75")
+        csv = tmp / "uno.csv"
+        _write_capture(csv, rows)
+        out = tmp / "models_uno"
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = fit.main(["--csv", str(csv), "--out-dir", str(out),
+                           "--no-header"])
+        names = sorted(p.name for p in out.glob("*.json"))
+        check("canal en reposo se omite", names == ["uno_S3.json"],
+              f"generados: {names}")
+        check("se avisa del canal omitido", "S4" in buf.getvalue()
+              and "sin senal" in buf.getvalue())
+
+        # Los dos canales con senal + --only S4: solo debe ajustarse S4.
+        rows2 = []
+        for i, (g, mv) in enumerate(signal):
+            rows2.append(f"2026-11-12T18:01:{i:02d},dos,0,S3,{g}.0,{mv},1.0,1,1.0,75")
+            rows2.append(f"2026-11-12T18:01:{i:02d},dos,1,S4,{g}.0,{mv * 0.95},1.0,1,1.0,75")
+        csv2 = tmp / "dos.csv"
+        _write_capture(csv2, rows2)
+        out2 = tmp / "models_dos"
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc2 = fit.main(["--csv", str(csv2), "--out-dir", str(out2),
+                            "--only", "S4", "--no-header"])
+        names2 = sorted(p.name for p in out2.glob("*.json"))
+        check("--only S4 ajusta solo ese canal", names2 == ["dos_S4.json"],
+              f"generados: {names2}")
+        check("ambos ajustes terminan bien", rc == 0 and rc2 == 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_capture_pause() -> None:
+    """La pausa entre puntos debe ser configurable y desactivable."""
+    print("\n6. Pausa entre puntos de captura")
+    from pc import capture
+    parser = capture.build_parser()
+    check("--pause por defecto = 10 s",
+          parser.parse_args([]).pause == 10.0)
+    check("--pause acepta otro valor",
+          parser.parse_args(["--pause", "4.5"]).pause == 4.5)
+    t0 = time.monotonic()
+    capture._pause_before_point(1000.0, 0)
+    check("--pause 0 no espera", time.monotonic() - t0 < 0.5)
+
+
 def test_round_trip_models() -> None:
-    print("\n5. Persistencia de modelos")
+    print("\n7. Persistencia de modelos")
     tmp = Path(__file__).resolve().parent.parent / "data" / "models"
     jsons = sorted(tmp.glob("*.json")) if tmp.exists() else []
     if not jsons:
@@ -146,6 +221,8 @@ def main() -> int:
     test_conversions()
     test_simulator()
     test_fit_recovers_law()
+    test_fit_channel_selection()
+    test_capture_pause()
     test_round_trip_models()
 
     print("\n" + "=" * 62)

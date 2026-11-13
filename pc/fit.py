@@ -66,7 +66,7 @@ def add_resistance(df: pd.DataFrame, vcc: float, r_fixed,
                    fsr_to_vcc: bool) -> pd.DataFrame:
     """Convierte mV -> ohmios usando la R_fija de CADA canal.
 
-    ``r_fixed`` puede ser un numero o una lista (p. ej. 1667 para S3 y 10000
+    ``r_fixed`` puede ser un numero o una lista (p. ej. 1633 para S3 y 1641
     para S4). El CSV trae la columna ``ch`` y de ahi se elige el valor.
     """
     df = df.copy()
@@ -84,6 +84,42 @@ def add_resistance(df: pd.DataFrame, vcc: float, r_fixed,
             fsr_to_vcc=fsr_to_vcc)
     df["ohms"] = ohms
     return df
+
+
+def parse_channel_selector(text: str | None) -> set[int] | None:
+    """Convierte 'S3,S4' o '0,1' en indices de canal.
+
+    Devuelve None si no se especifico nada (todos los canales).
+    """
+    if not text:
+        return None
+    out: set[int] = set()
+    for token in text.replace(";", ",").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        upper = token.upper()
+        if upper in fsr.CHANNELS:
+            out.add(fsr.CHANNELS.index(upper))
+            continue
+        try:
+            idx = int(upper)
+        except ValueError:
+            raise ValueError(f"canal desconocido: {token!r} (usa S3, S4 o 0, 1)")
+        if idx < 0:
+            raise ValueError(f"indice de canal invalido: {idx}")
+        out.add(idx)
+    return out or None
+
+
+def has_signal(sub: pd.DataFrame, min_mv: float | None = None) -> bool:
+    """True si el canal supera el umbral de senal minima en algun punto."""
+    if min_mv is None:
+        min_mv = fsr.ADC_MIN_V * 1000.0
+    if sub.empty or "mv_mean" not in sub.columns:
+        return False
+    peak = float(np.nanmax(sub["mv_mean"].to_numpy(dtype=float)))
+    return math.isfinite(peak) and peak >= min_mv
 
 
 def aggregate(df: pd.DataFrame) -> pd.DataFrame:
@@ -281,10 +317,10 @@ def plot_channel(agg: pd.DataFrame, fits: list[dict], best: dict,
 
 def write_calibration_header(models: list[dict], path: Path,
                              vcc: float, r_fixed, fsr_to_vcc: bool) -> None:
-    n_ch = max(int(m.get("ch", i)) for i, m in enumerate(models)) + 1
     by_ch = {int(m.get("ch", i)): m for i, m in enumerate(models)}
-    r_vals = [fsr.r_fixed_for(i, r_fixed)
-              if i in by_ch else float("nan") for i in range(n_ch)]
+    max_ch = max(by_ch) if by_ch else 0
+    n_ch = max(len(fsr.CHANNELS), max_ch + 1)
+    r_vals = [fsr.r_fixed_for(i, r_fixed) for i in range(n_ch)]
     lines = [
         "/* Generado automaticamente por pc/fit.py. NO EDITAR A MANO. */",
         f"/* Fecha: {_dt.datetime.now().isoformat(timespec='seconds')} */",
@@ -295,6 +331,7 @@ def write_calibration_header(models: list[dict], path: Path,
         "   Cada canal puede usar una resistencia fija distinta.",
         "*/",
         "#pragma once",
+        "#include <cmath>   // nanf() para canales sin modelo",
         "",
         f"#define CAL_N_CH {n_ch}",
         "static const float CAL_R_FIXED_OHMS[CAL_N_CH] = { "
@@ -303,11 +340,16 @@ def write_calibration_header(models: list[dict], path: Path,
         f"static const bool  CAL_FSR_TO_VCC   = {'true' if fsr_to_vcc else 'false'};",
         "",
     ]
-    a_vals, b_vals, ok = [], [], True
-    for m in models:
-        emb = m.get("embedded") or (m if m.get("model") == "power_law" else None)
+    a_vals, b_vals, ok, missing = [], [], True, []
+    for i in range(n_ch):
+        m = by_ch.get(i)
+        emb = None
+        if m:
+            emb = m.get("embedded") or (
+                m if m.get("model") == "power_law" else None)
         if not emb or not emb.get("params"):
             ok = False
+            missing.append(i)
             a_vals.append(float("nan"))
             b_vals.append(float("nan"))
         else:
@@ -315,9 +357,12 @@ def write_calibration_header(models: list[dict], path: Path,
             b_vals.append(emb["params"]["B"])
 
     if not ok:
+        names = ", ".join(
+            fsr.CHANNELS[i] if i < len(fsr.CHANNELS) else f"ch{i}"
+            for i in missing)
         lines.append("/* AVISO: algun canal no se pudo ajustar con la ley potencial;")
-        lines.append("   los canales marcados con nan no se pueden evaluar con esta")
-        lines.append("   formula. Reajusta con --model power_law. */")
+        lines.append(f"   canales sin modelo: {names} (parametros nan).")
+        lines.append("   Reajusta con --model power_law o completa la captura. */")
     else:
         lines.append("/* Coeficientes de la LEY POTENCIAL (M1), que es el modelo")
         lines.append("   embebible, aunque el mejor modelo del analisis sea otro. */")
@@ -344,13 +389,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vcc", type=float, help="sobrescribe el VCC del CSV")
     p.add_argument("--r-fixed",
                    help="sobrescribe R_fixed del CSV; acepta un valor por canal: "
-                        "1667,10000")
+                        "1633,1641")
     p.add_argument("--topology", choices=["fsr_to_vcc", "fsr_to_gnd"],
                    help="sobrescribe la topologia del CSV")
     p.add_argument("--model", choices=["auto", "power_law", "quad_log", "interp"],
                    default="auto", help="forzar un modelo en vez de elegir el mejor")
     p.add_argument("--drop-saturated", action="store_true",
                    help="descartar puntos por encima del limite fiable del ADC")
+    p.add_argument("--only",
+                   help="ajustar solo estos canales: S3, S4 o 0, 1 "
+                        "(por defecto, todos los que tengan senal)")
     p.add_argument("--show", action="store_true", help="abrir las graficas")
     p.add_argument("--no-header", action="store_true",
                    help="no generar calibration.h")
@@ -368,7 +416,12 @@ def main(argv=None) -> int:
         raise SystemExit("el CSV no tiene datos")
 
     vcc = args.vcc if args.vcc is not None else float(meta.get("vcc", fsr.VCC_VOLTS))
-    n_ch = int(df["ch"].nunique()) if "ch" in df.columns else len(fsr.CHANNELS)
+    if "ch" in df.columns:
+        ch_present = sorted(int(x) for x in df["ch"].dropna().unique())
+    else:
+        ch_present = [0]
+    # El firmware define los canales; el CSV puede traer solo uno.
+    n_ch = max(len(fsr.CHANNELS), max(ch_present) + 1)
     raw_r = args.r_fixed if args.r_fixed is not None else meta.get(
         "r_fixed", fsr.R_FIXED_OHMS)
     try:
@@ -377,6 +430,20 @@ def main(argv=None) -> int:
         raise SystemExit(f"ERROR en --r-fixed: {exc}")
     topo = args.topology or meta.get("topologia", fsr.topology_name())
     fsr_to_vcc = fsr.parse_topology(topo)
+
+    try:
+        only = parse_channel_selector(args.only)
+    except ValueError as exc:
+        raise SystemExit(f"ERROR en --only: {exc}")
+    if only is not None:
+        missing = sorted(only - set(ch_present))
+        if missing:
+            names = ", ".join(
+                fsr.CHANNELS[i] if i < len(fsr.CHANNELS) else f"ch{i}"
+                for i in missing)
+            raise SystemExit(
+                f"ERROR: --only pide canal(es) que no estan en el CSV: {names}")
+        df = df[df["ch"].fillna(-1).astype(int).isin(only)]
 
     df = add_resistance(df, vcc, r_fixed, fsr_to_vcc)
 
@@ -387,6 +454,11 @@ def main(argv=None) -> int:
     print(f"  divisor : R_fixed={fsr.format_r_fixed(r_fixed)} ohm  "
           f"VCC={vcc:.3f} V  ({topo})")
     print(f"  filas   : {len(df)}")
+    if only is not None:
+        names = ", ".join(
+            fsr.CHANNELS[i] if i < len(fsr.CHANNELS) else f"ch{i}"
+            for i in sorted(only))
+        print(f"  canales : solo {names} (--only)")
     if meta.get("creado"):
         print(f"  creado  : {meta['creado']}")
     print()
@@ -411,11 +483,21 @@ def main(argv=None) -> int:
 
     out_dir = Path(args.out_dir)
     models_out: list[dict] = []
+    min_mv = fsr.ADC_MIN_V * 1000.0
 
     for ch, sub in df.groupby("ch"):
+        if "nombre" in sub.columns and not sub["nombre"].dropna().empty:
+            name = str(sub["nombre"].dropna().iloc[0])
+        else:
+            name = f"ch{int(ch)}"
+        if not has_signal(sub, min_mv):
+            peak = float(np.nanmax(sub["mv_mean"].to_numpy(dtype=float)))
+            print(f"  [ ] {name}: sin senal (max {peak:.1f} mV < "
+                  f"{min_mv:.0f} mV); se omite del ajuste.")
+            continue
+
         rf_ch = fsr.r_fixed_for(int(ch), r_fixed)
         agg = aggregate(sub)
-        name = str(agg["nombre"].iloc[0])
         fit_rows = agg[(agg["gramos"] > 0) & np.isfinite(agg["ohms"])]
         if len(fit_rows) < 2:
             print(f"  [x] {name}: solo {len(fit_rows)} punto(s) util(es); "

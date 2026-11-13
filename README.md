@@ -7,19 +7,19 @@ reales.
 Pensado para el montaje:
 
 ```
-        3V3 ──[ FSR402 ]──┬──[ R 1667 Ω ]── GND
+        3V3 ──[ FSR402 ]──┬──[ R 1,63 kΩ ]── GND
                           │
                           ├── GPIO35   (S3)
                           └── GPIO34   (S4)
 ```
 
-`R 1667 Ω` se consigue con **10 kΩ en paralelo con 2 kΩ**. Al presionar, la
-resistencia del FSR baja y la tensión del nodo sube:
-`R_fsr = 1667 · (VCC − V_nodo) / V_nodo`.
+`R 1,63 kΩ` se consigue con **10 kΩ en paralelo con 2 kΩ** (nominal). En este
+montaje se midieron **1633 Ω (S3)** y **1641 Ω (S4)**, con un valor medio de
+**1637 Ω**. Al presionar, la resistencia del FSR baja y la tensión del nodo sube:
+`R_fsr = 1637 · (VCC − V_nodo) / V_nodo`.
 
 Ese valor es el que permite llegar a **5 kg** sin que el ADC del ESP32 entre en
-la zona no caracterizada (por encima de ~2,45 V). Con la 10 kΩ original, 5 kg
-recortaba en ~3,15 V.
+la zona no caracterizada (por encima de ~2,45 V).
 
 ---
 
@@ -60,7 +60,7 @@ de forma local (nada global).
 Todo listo. Para usar los scripts, activa el entorno en la terminal:
 
 ```powershell
-cd "C:\Users\Isaac\Documents\Sistemas embebidos\proyecto\proyecto_bungie"
+cd "C:\ruta\a\proyecto_bungie"
 .\.venv\Scripts\Activate.ps1
 ```
 
@@ -104,7 +104,7 @@ Debe terminar con `Todo correcto: el entorno esta listo para calibrar.`
 5. Abre el *Serial Monitor* a **115200** baudios. Debes ver:
 
 ```
-# ch0=S3 ch1=S4 r_fixed=1666.70 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
+# ch0=S3 ch1=S4 r_fixed=1637.00 vcc=3.27 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
 # ms,raw0,mv0,raw1,mv1
 12345,1534,1234.5,1480,1190.2
 12385,1536,1235.1,1479,1190.0
@@ -115,16 +115,19 @@ Debe terminar con `Todo correcto: el entorno esta listo para calibrar.`
 ### Compilar desde consola (sin abrir el IDE)
 
 ```powershell
-& "E:\Arduino\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" `
+& "<RUTA_AL_ARDUINO_CLI>\arduino-cli.exe" `
     compile --fqbn esp32:esp32:esp32 firmware\fsr_stream
 ```
+
+> `arduino-cli.exe` viene incluido con Arduino IDE 2.x; sustitúyelo por la ruta
+> de tu instalación o usa `arduino-cli` si lo tienes en el `PATH`.
 
 ### Qué ajustar en el sketch
 
 | Constante | Qué es | Cuándo cambiarla |
 |---|---|---|
 | `VCC_VOLTS` | tensión real del pin 3V3 | **Mídela con multímetro**; si no, el modelo arrastra un error de escala |
-| `R_FIXED_OHMS` | resistencia fija real | Si mides 1710 Ω en vez de 1667 Ω |
+| `R_FIXED_OHMS` | resistencia fija real | Si mides 1710 Ω en vez de 1637 Ω |
 | `FSR_TO_VCC` | orientación del divisor | Solo si cambias el cableado |
 | `OVERSAMPLE` | lecturas por muestra | Subir si hay mucho ruido |
 | `REPORT_HZ` | líneas por segundo | 25 va sobrado |
@@ -197,7 +200,7 @@ Comandos: `u` deshacer último punto · `l` listar · `q` salir.
 ```powershell
 .\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg `
     --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
-    --reps 2 --hold 2.0 --r-fixed 1667
+    --reps 2 --hold 2.0 --vcc 3.27 --r-fixed 1633,1641
 ```
 
 Espera a que la señal sea estable (desviación ≤ 3 mV durante 1 s) antes de
@@ -243,12 +246,18 @@ Opciones útiles:
 ```powershell
 --drop-saturated     # descarta puntos por encima de 2.45 V y compara
 --model power_law    # fuerza el modelo embebible
---vcc 3.28           # si mides otra tensión de riel
---r-fixed 1667,10000 # si los dos canales usan resistencias distintas
+--vcc 3.27           # si mides otra tensión de riel
+--r-fixed 1633,1641  # si los dos canales usan resistencias distintas
+--only S3            # ajusta solo un sensor (S3, S4 o 0,1)
 ```
 
 El CSV guarda su propio `vcc`, `r_fixed` y topología, así que `fit.py` los
 recupera sin que tengas que repetirlos.
+
+Si calibras **un sensor por sesión**, el CSV seguirá teniendo una fila por
+canal (el otro sensor aparecerá en reposo). `fit.py` omite automáticamente los
+canales sin señal (≤ 30 mV) y lo indica en consola; con `--only S3` o
+`--only S4` fuerzas cuál quieres ajustar.
 
 ---
 
@@ -298,13 +307,14 @@ una célula de carga + HX711.
 Con `3V3 → FSR → 10k → GND`, un FSR402 a ~1 kg ya está en ~2,5 V, el techo
 fiable del ADC del ESP32: con la 10 kΩ original **5 kg recorta** (~3,15 V).
 
-Por eso el montaje por defecto usa **1667 Ω = 10 kΩ ∥ 2 kΩ**:
+Por eso el montaje por defecto usa **~1637 Ω** (nominal **10 kΩ ∥ 2 kΩ**; en
+este montaje se midieron 1633 Ω y 1641 Ω):
 
 | `R_fija` | V a 5 kg | Zona fiable hasta | V a 100 g |
 |---|---:|---:|---:|
 | 10 kΩ | 3,15 V ❌ | ~0,9 kg | 690 mV |
 | 2 kΩ | 2,67 V | ~3,8 kg | 170 mV |
-| **1,67 kΩ** | **2,53 V** | **~4,5 kg** | **140 mV** |
+| **1,63 kΩ** | **2,50 V** | **~4,5 kg** | **140 mV** |
 | 1 kΩ | 2,24 V ✅ | ~7 kg | 85 mV |
 
 La tabla usa un FSR402 típico; tu unidad variará. Decide con

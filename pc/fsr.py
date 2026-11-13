@@ -26,15 +26,18 @@ DATA_MODELS = ROOT / "data" / "models"
 FIRMWARE_DIR = ROOT / "firmware" / "fsr_stream"
 
 # ---------------------------------------------------------------- hardware
-# Mide estos dos valores con el multimetro. Un 5 % de error en VCC se
-# traduce en un error notable en la resistencia calculada.
+# Valores medidos en este montaje (multimetro sobre el hardware real).
+# VCC se midio en 3.27 V en el pin 3V3 con el USB conectado.
 #
-# R_FIXED = 1666.7 ohm  ->  una resistencia de 10k en paralelo con una de 2k.
-# Es el valor recomendado para llegar a 5 kg sin que el ADC recorte:
-#   V(5 kg) ~ 2.57 V, dentro del techo fiable de 2.45-3.10 V.
-# Si usas otro valor, cambialo aqui (y en el sketch, solo informativo).
-R_FIXED_OHMS = 1666.7
-VCC_VOLTS = 3.30
+# R_FIXED es la resistencia fija efectiva del divisor, medida por canal:
+#   S3: 9.78k || 1.96k = 1633 ohm
+#   S4: 9.83k || 1.97k = 1641 ohm
+# El promedio (1637 ohm) se usa como valor por defecto; para maxima
+# precision pasa los valores por canal:  --r-fixed 1633,1641
+# Si cambias el montaje, vuelve a medir y actualiza estos valores (y el
+# sketch, solo informativo).
+R_FIXED_OHMS = 1637.0
+VCC_VOLTS = 3.27
 FSR_TO_VCC = True
 
 CHANNELS = ("S3", "S4")      # orden identico al firmware (GPIO35, GPIO34)
@@ -65,7 +68,7 @@ def parse_r_fixed(value, n_ch: int | None = None) -> float | list[float]:
     """Acepta un valor unico o una lista separada por comas.
 
     Con una lista se asigna un valor por canal, en el mismo orden que el
-    firmware (S3, S4):  --r-fixed 1667,10000
+    firmware (S3, S4):  --r-fixed 1633,1641
 
     Puede venir de argparse (str), de un CSV (str) o ya como numero/lista.
     """
@@ -81,7 +84,7 @@ def parse_r_fixed(value, n_ch: int | None = None) -> float | list[float]:
         text = str(value).strip()
         if not text:
             return float(R_FIXED_OHMS)
-        # Acepta "1667,10000", "1667;10000" y "1667/10000" (formato del CSV).
+        # Acepta "1633,1641", "1633;1641" y "1633/1641" (formato del CSV).
         parts = [p for p in text.replace(";", ",").replace("/", ",").split(",")
                  if p.strip()]
         vals = []
@@ -110,7 +113,7 @@ def r_fixed_for(ch: int, r_fixed=None) -> float:
 
 
 def format_r_fixed(r_fixed) -> str:
-    """'1667' o '1667/10000' para cabeceras y mensajes."""
+    """'1637' o '1633/1641' para cabeceras y mensajes."""
     if isinstance(r_fixed, (list, tuple)):
         return "/".join(f"{float(v):.0f}" for v in r_fixed)
     return f"{float(r_fixed):.0f}"

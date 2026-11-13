@@ -12,7 +12,7 @@ proyecto. Responde a "¿qué script uso, con qué opciones y qué va a producir?
 Todos los comandos se ejecutan desde la raíz del proyecto:
 
 ```powershell
-cd "C:\Users\Isaac\Documents\Sistemas embebidos\proyecto\proyecto_bungie"
+cd "C:\ruta\a\proyecto_bungie"
 .\.venv\Scripts\Activate.ps1
 ```
 
@@ -125,7 +125,7 @@ python pc\probe.py                      # autodetecta el puerto
   Duracion : 4.0 s
   Lineas   : 103 total (101 validas, 0 formato antiguo, 2 cabeceras)
   Frecuencia: 25.2 muestras/s
-  Cabecera : # ch0=S3 ch1=S4 r_fixed=1666.70 vcc=3.30 ...
+  Cabecera : # ch0=S3 ch1=S4 r_fixed=1637.00 vcc=3.27 ...
   Muestra  : 12345,1534,1234.5,1480,1190.2
 
   VEREDICTO: OK - el firmware responde en el formato esperado
@@ -178,12 +178,13 @@ python pc\capture.py --simulate --session prueba
 | `--baud` | `115200` | baudrate |
 | `--session` | `sesion_AAAAMMDD_HHMMSS` | nombre del CSV en `data/raw/` |
 | `--hold` | `3.0` | segundos promediados por punto |
-| `--vcc` | `3.3` | tensión real del riel |
-| `--r-fixed` | `1666.7` | resistencia fija; admite `1667,10000` por canal |
+| `--vcc` | `3.27` | tensión real del riel |
+| `--r-fixed` | `1637.0` | resistencia fija; admite `1633,1641` por canal |
 | `--topology` | `fsr_to_vcc` | orientación del divisor |
 | `--simulate` | no | datos sintéticos, sin hardware |
 | `--sweep` | — | lista de pesos a recorrer |
 | `--reps` | `1` | capturas por peso en `--sweep` |
+| `--pause` | `10.0` | pausa antes de cada punto de `--sweep` para quitar/aplicar la carga (`0` = sin pausa) |
 | `--settle` | `1.0` | espera tras aplicar el peso |
 | `--stab-window` | `1.0` | ventana para medir estabilidad |
 | `--stab-mv` | `3.0` | desviación máxima para considerar estable |
@@ -220,12 +221,17 @@ La confirmación `[S/n/r]` evita guardar un punto malo: `S` guarda, `n` descarta
 ```powershell
 python pc\capture.py --port COM4 --session fsr5kg `
     --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
-    --reps 2 --hold 2.0 --r-fixed 1667
+    --reps 2 --hold 2.0 --vcc 3.27 --r-fixed 1633,1641
 ```
 
-Para cada peso espera a que la desviación baje de `--stab-mv` durante
-`--stab-window`. Si no lo consigue en `--stab-timeout`, captura igual y avisa.
-**Revisa el `mv_std` de ese punto antes de fiarte.**
+Antes de cada punto muestra una cuenta atrás de `--pause` segundos (10 por
+defecto): es el tiempo para **quitar la carga anterior y aplicar la siguiente**.
+Puedes terminar la espera antes pulsando ENTER. Con `--pause 0` el barrido
+avanza sin pausa (útil solo con pesos automáticos).
+
+Después espera a que la desviación baje de `--stab-mv` durante `--stab-window`.
+Si no lo consigue en `--stab-timeout`, captura igual y avisa. **Revisa el
+`mv_std` de ese punto antes de fiarte.**
 
 ### 5.3 Comprobación de rango
 
@@ -241,7 +247,7 @@ Muestra el pico de cada canal durante `--range-seconds` y recomienda
      S3   2530.4        514 ohm              1.18 kohm
           -> OK: por debajo de 2450 mV
           -> para 5000 g en ~2.3 V usa R_fija ~= 1.18 kohm (maximo 1.48 kohm)
-          -> tu R_fija actual (1667 ohm) es adecuada
+          -> tu R_fija actual (1637 ohm) es adecuada
 ```
 
 No crea CSV. Es el paso que decide si necesitas `1k` en vez de `1,67k`.
@@ -252,8 +258,8 @@ No crea CSV. Es el paso que decide si necesitas `1k` en vez de `1,67k`.
 
 ```
 # calibracion FSR - puntos de referencia
-# vcc=3.30
-# r_fixed=1667/10000
+# vcc=3.27
+# r_fixed=1633/1641
 # topologia=fsr_to_vcc
 # canales=S3,S4
 # creado=2026-11-11T18:22:01
@@ -274,6 +280,11 @@ Si reutilizas una sesión con otro `vcc`, `r_fixed`, topología o número de
 canales, el script se niega: usa otra `--session` para no mezclar
 configuraciones.
 
+**Una fila por canal:** cada peso genera dos filas (una de S3 y otra de S4),
+aunque solo estés cargando un sensor. Es intencionado: así puedes calibrar los
+dos a la vez si comparten carga, y el sensor en reposo sirve de control.
+`fit.py` omite el canal sin señal; no hace falta borrar filas del CSV.
+
 ---
 
 ## 6. `fit.py` — ajuste y evaluación
@@ -286,7 +297,7 @@ modelos por sensor y los compara con validación cruzada (LOOCV).
 ```powershell
 python pc\fit.py --csv data\raw\fsr5kg.csv
 python pc\fit.py --csv data\raw\fsr5kg.csv --show
-python pc\fit.py --csv data\raw\fsr5kg.csv --r-fixed 1667,10000
+python pc\fit.py --csv data\raw\fsr5kg.csv --vcc 3.27 --r-fixed 1633,1641
 ```
 
 **Opciones:**
@@ -296,12 +307,23 @@ python pc\fit.py --csv data\raw\fsr5kg.csv --r-fixed 1667,10000
 | `--csv` | obligatorio | CSV de `capture.py` |
 | `--out-dir` | `data/models` | dónde guardar JSON/PNG |
 | `--vcc` | del CSV | sobrescribe la tensión |
-| `--r-fixed` | del CSV | sobrescribe la resistencia; admite `1667,10000` |
+| `--r-fixed` | del CSV | sobrescribe la resistencia; admite `1633,1641` |
 | `--topology` | del CSV | sobrescribe el divisor |
 | `--model` | `auto` | fuerza `power_law`, `quad_log` o `interp` |
 | `--drop-saturated` | no | descarta puntos > 2450 mV |
+| `--only` | todos con señal | ajusta solo `S3`, `S4` o `0,1` |
 | `--show` | no | abre las gráficas |
 | `--no-header` | no | no genera `calibration.h` |
+
+**Canales sin señal:** si calibras un sensor por sesión, el otro canal queda en
+reposo (~0–1 mV). `fit.py` lo detecta (< 30 mV), lo omite y avisa:
+
+```text
+  [ ] S4: sin senal (max 1.1 mV < 30 mV); se omite del ajuste.
+```
+
+No genera un modelo basura para ese canal. Para forzar uno concreto:
+`--only S3` o `--only S4`.
 
 **Salida por canal:**
 
@@ -365,8 +387,8 @@ conversiones. Lo que se toca:
 
 | Constante | Defecto | Cuándo cambiarla |
 |---|---|---|
-| `R_FIXED_OHMS` | `1666.7` | si tu resistencia real difiere |
-| `VCC_VOLTS` | `3.30` | **mídela** con multímetro |
+| `R_FIXED_OHMS` | `1637.0` | si tu resistencia real difiere |
+| `VCC_VOLTS` | `3.27` | **mídela** con multímetro |
 | `FSR_TO_VCC` | `True` | si inviertes el divisor |
 | `ADC_TRUST_V` | `2.45` | techo fiable del ADC |
 | `ADC_MAX_V` | `3.10` | techo físico |
@@ -383,8 +405,8 @@ Archivo `firmware/fsr_stream/fsr_stream.ino`.
 
 | Constante | Defecto | Para qué |
 |---|---|---|
-| `R_FIXED_OHMS` | `1666.7f` | informativo; la conversión real la hace el PC |
-| `VCC_VOLTS` | `3.30f` | informativo |
+| `R_FIXED_OHMS` | `1637.0f` | informativo; la conversión real la hace el PC |
+| `VCC_VOLTS` | `3.27f` | informativo |
 | `FSR_TO_VCC` | `true` | orientación del divisor |
 | `OVERSAMPLE` | `32` | lecturas ADC por muestra; súbelo si hay ruido |
 | `REPORT_HZ` | `25` | líneas por segundo |
@@ -394,7 +416,7 @@ Archivo `firmware/fsr_stream/fsr_stream.ino`.
 **Formato de línea:**
 
 ```
-# ch0=S3 ch1=S4 r_fixed=1666.70 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
+# ch0=S3 ch1=S4 r_fixed=1637.00 vcc=3.27 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
 # ms,raw0,mv0,raw1,mv1
 12345,1534,1234.5,1480,1190.2
 ```
@@ -418,29 +440,35 @@ python pc\capture.py --port COM4 --range-check --target 5000
 Decide la resistencia con el resultado del `--range-check` (ver
 [procedimiento, sección 3](procedimiento_calibracion.md#3-comprobar-el-rango-antes-de-calibrar)).
 
-### 10.2 Calibrar un sensor
+### 10.2 Calibrar un sensor (uno por sesión)
 
 ```powershell
-python pc\capture.py --port COM4 --session fsr5kg `
+python pc\capture.py --port COM4 --session fsr5kg_S3 `
     --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
-    --reps 2 --hold 2.0 --r-fixed 1667
-python pc\fit.py --csv data\raw\fsr5kg.csv
+    --reps 2 --hold 2.0 --vcc 3.27 --r-fixed 1633,1641
+python pc\fit.py --csv data\raw\fsr5kg_S3.csv --only S3
 python pc\live.py --port COM4 --models data\models
 ```
 
+Repite con `--session fsr5kg_S4` y `fit.py ... --only S4` para el otro sensor.
+El CSV guarda las dos filas por peso; `fit.py` omite el canal que no cargaste.
+
 Valida con un peso conocido, no con los mismos puntos del ajuste.
 
-### 10.3 Dos sensores con resistencias distintas
+### 10.3 Dos sensores a la vez (misma carga)
+
+Si ambos FSR reciben la misma carga, no uses `--only`: se ajustan los dos en la
+misma sesión.
 
 ```powershell
-python pc\capture.py --port COM4 --session mixto --r-fixed 1667,10000 ...
+python pc\capture.py --port COM4 --session mixto --r-fixed 1633,1641 ...
 ```
 
-El CSV guarda `r_fixed=1667/10000`. Después:
+El CSV guarda `r_fixed=1633/1641`. Después:
 
 ```powershell
 python pc\fit.py --csv data\raw\mixto.csv          # lo lee del CSV
-python pc\fit.py --csv data\raw\mixto.csv --r-fixed 1667,10000   # o lo fuerzas
+python pc\fit.py --csv data\raw\mixto.csv --r-fixed 1633,1641   # o lo fuerzas
 ```
 
 `fit.py` convierte cada fila con la resistencia de su canal.
@@ -491,7 +519,7 @@ muestras.
   "nombre": "S3",
   "model": "power_law",
   "params": {"A": 3.2e7, "B": -2.19},
-  "hardware": {"vcc": 3.3, "r_fixed": 1666.7, "topologia": "fsr_to_vcc"},
+  "hardware": {"vcc": 3.27, "r_fixed": 1633.0, "topologia": "fsr_to_vcc"},
   "metrics": {"rmse_g": 18.4, "r2": 0.9987,
               "max_abs_g": 41.0, "loocv_rmse_g": 22.1},
   "embedded": {"model": "power_law", "params": {"A": 3.2e7, "B": -2.19},
@@ -513,8 +541,8 @@ muestras.
 #pragma once
 
 #define CAL_N_CH 2
-static const float CAL_R_FIXED_OHMS[CAL_N_CH] = { 1666.7f, 10000.0f };
-static const float CAL_VCC_VOLTS    = 3.300f;
+static const float CAL_R_FIXED_OHMS[CAL_N_CH] = { 1633.0f, 1641.0f };
+static const float CAL_VCC_VOLTS    = 3.270f;
 static const bool  CAL_FSR_TO_VCC   = true;
 
 static const float CAL_A[] = { 3.2e+07f, 2.9e+07f };
@@ -545,12 +573,13 @@ Windows); los documentos sí usan UTF-8.
 --baud 115200          baudrate
 --session NOMBRE       nombre del CSV
 --hold 3.0             s promediados por punto
---vcc 3.30             tensión del riel
---r-fixed 1667         o 1667,10000
+--vcc 3.27             tensión del riel
+--r-fixed 1633,1641    o un único valor
 --topology fsr_to_vcc
 --simulate             sin hardware
 --sweep 0,500,1000     barrido
 --reps 2               repeticiones por peso
+--pause 10             pausa antes de cada punto (0 = sin pausa)
 --settle 1.0           espera tras aplicar peso
 --stab-window 1.0      ventana de estabilidad
 --stab-mv 3.0          umbral de estabilidad
@@ -566,11 +595,12 @@ Windows); los documentos sí usan UTF-8.
 ```
 --csv ARCHIVO          obligatorio
 --out-dir data/models
---vcc 3.30
---r-fixed 1667         o 1667,10000
+--vcc 3.27
+--r-fixed 1633,1641    o un único valor
 --topology fsr_to_vcc
 --model auto           power_law | quad_log | interp
 --drop-saturated
+--only S3              S3 | S4 | 0,1
 --show
 --no-header
 ```
@@ -608,7 +638,7 @@ Windows); los documentos sí usan UTF-8.
 | `No existe COM4 o esta desconectado.` | cable o número de puerto | revisa Administrador de dispositivos |
 | `No llegan muestras validas del ESP32.` | preflight de `capture.py` | ejecuta `probe.py --raw` |
 | `muy pocas muestras en la ventana` | `--hold` muy corto o enlace caído | sube `--hold` o revisa el cable |
-| `--r-fixed tiene N valores pero hay 2 canales` | lista mal formada | pasa 1 o 2 valores: `1667` o `1667,10000` |
+| `--r-fixed tiene N valores pero hay 2 canales` | lista mal formada | pasa 1 o 2 valores: `1637` o `1633,1641` |
 | `ya existe con r_fixed=... y ahora usas ...` | sesión reutilizada con otro hardware | usa otra `--session` |
 | `el CSV no tiene datos` | captura interrumpida antes de guardar | repite la captura |
 | `solo N punto(s) util(es); necesito al menos 2` | demasiados puntos a 0 g | añade puntos con peso |

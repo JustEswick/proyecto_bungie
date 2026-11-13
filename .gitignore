@@ -26,3 +26,7 @@ data/models/*.png
 # Windows
 Thumbs.db
 desktop.ini
+
+# Guias privadas / datos del equipo (no publicar)
+GUIA_PRIVADA_CALIBRACION.md
+*.private.md

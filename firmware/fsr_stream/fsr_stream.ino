@@ -8,8 +8,9 @@
                           |
                         GPIO (ADC)
 
-     R_FIXED = 1666.7 ohm (10k en paralelo con 2k) para llegar a 5 kg sin
-     que el ADC recorte. Si usas otro valor, cambia R_FIXED_OHMS mas abajo.
+     R_FIXED = 1637 ohm (valor medio medido; S3 = 1633, S4 = 1641).
+     Es el valor por defecto de este montaje. Si usas otro, cambia
+     R_FIXED_OHMS mas abajo.
 
      Al presionar, R_FSR baja  ->  V_nodo SUBE.
      R_FSR = R_FIXED * (VCC - V_nodo) / V_nodo
@@ -25,7 +26,7 @@
      resistencias pull-up ni salidas digitales).
 
    SALIDA (115200 baudios, CSV plano, 25 Hz):
-       # ch0=S3 ch1=S4 r_fixed=1666.70 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
+       # ch0=S3 ch1=S4 r_fixed=1637.00 vcc=3.27 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
        # ms,raw0,mv0,raw1,mv1
        12345,1534,1234.5,1480,1190.2
        ...
@@ -51,16 +52,15 @@ static const uint8_t N_CH = 2;
 static const uint8_t PIN_ADC[N_CH] = { 35, 34 };          // S3, S4
 static const char*   CH_NAME[N_CH] = { "S3", "S4" };
 
-// Resistencia fija del divisor, en ohmios. Mide la tuya con el multimetro
-// si quieres precision. 1666.7 = 10k || 2k: 5 kg cae en ~2.57 V, dentro de
-// la zona fiable del ADC. Solo es informativo: la conversion real la hace
-// el PC con --r-fixed.
-static const float R_FIXED_OHMS = 1666.7f;
+// Resistencia fija del divisor, en ohmios. Valor medio medido en este
+// montaje: S3 = 1633 ohm (9.78k || 1.96k), S4 = 1641 ohm (9.83k || 1.97k).
+// Solo es informativo: la conversion real la hace el PC con --r-fixed.
+static const float R_FIXED_OHMS = 1637.0f;
 
-// Voltaje real del riel de 3V3, medido con multimetro.
+// Voltaje real del riel de 3V3, medido con multimetro en este montaje.
 // OJO: no pongas 3.30 "porque si". Mide el pin 3V3 de la placa con el USB
-// conectado; tipicamente da 3.25..3.35 V y de ahi depende el calculo de R.
-static const float VCC_VOLTS = 3.30f;
+// conectado; de ahi depende el calculo de R.
+static const float VCC_VOLTS = 3.27f;
 
 // Topologia del divisor:
 //   true  -> 3V3 -> FSR -> nodo -> R_FIXED -> GND     (V sube al presionar)
