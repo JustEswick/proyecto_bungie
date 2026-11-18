@@ -145,7 +145,7 @@ gramos.
 
 ```powershell
 .\.venv\Scripts\python.exe pc\capture.py --simulate --session demo `
-    --sweep 0,50,100,200,500,1000,2000,3000
+    --channel 0 --sweep 0,50,100,200,500,1000,2000,3000
 .\.venv\Scripts\python.exe pc\fit.py --csv data\raw\demo.csv
 ```
 
@@ -175,37 +175,45 @@ Si el pico pasa de 2450 mV, baja `R_fija` (por ejemplo a `1k`) y repite.
 ### 4.3 Captura interactiva
 
 ```powershell
-.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg_S3 --channel 0
 ```
 
 Flujo en el prompt:
 
 ```
-  Lectura en vivo (ventana 3 s):
+  Lectura reciente (ventana 3 s):
     S3  mv=   412.3 +/-  1.9  R=    11.7 kohm  n=75
-    S4  mv=   398.0 +/-  2.2  R=    12.2 kohm  n=75
-  gramos en la bascula >
+
+  ENTER para capturar / comando >
 ```
 
 1. Apoya el sensor en la báscula con el **disco rígido** encima y tara a 0.
-2. Presiona hasta que la báscula marque un peso estable.
-3. Escribe el número y pulsa ENTER **mientras sigues presionando**: el programa
-   promedia la ventana anterior al ENTER y te pide confirmación `[S/n/r]`.
-4. ENTER en vacío solo **refresca** la lectura, no guarda nada.
+2. Pulsa **ENTER** y mantén la fuerza durante `--hold` segundos.
+3. Al terminar, las muestras quedan congeladas: **suelta el dedo** y escribe el
+   peso observado en la báscula. Mínimo y máximo son opcionales.
+4. Confirma con `[S/n/r]`: `S` guarda, `n` descarta, `r` repite la captura.
 
-Comandos: `u` deshacer último punto · `l` listar · `q` salir.
+Comandos: `u` deshacer último punto · `l` listar · `q` salir. Cada sesión
+guarda **un solo sensor** (`--channel 0` = S3, `--channel 1` = S4).
 
 ### 4.4 Barrido guiado (recomendado para la sesión buena)
 
 ```powershell
-.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg `
-    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
-    --reps 2 --hold 2.0 --vcc 3.27 --r-fixed 1633,1641
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg_S3 `
+    --channel 0 `
+    --sweep 0,250,500,750,1000,1500,2000,2500,3000,3500,4000,4500 `
+    --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
+    --vcc 3.27 --r-fixed 1633,1641
 ```
 
-Espera a que la señal sea estable (desviación ≤ 3 mV durante 1 s) antes de
-capturar, así no dependes de tu pulso. Para el protocolo completo, la elección
-de `R_fija` y la interpretación de las gráficas, ver
+Espera a que la señal del **canal elegido** sea estable (desviación ≤ 3 mV
+durante 1 s) antes de capturar, así no dependes de tu pulso. Después congela las
+muestras y te pide el peso observado. La lista termina en **4500 g** porque la
+báscula se reinicia a 5 kg; el último 10 % se extrapola y se declara como
+limitación.
+
+Para el protocolo completo, la elección de `R_fija` y la interpretación de las
+gráficas, ver
 [`docs/procedimiento_calibracion.md`](docs/procedimiento_calibracion.md).
 Todas las opciones de cada script están en
 [`docs/guia_scripts.md`](docs/guia_scripts.md).
@@ -254,10 +262,11 @@ Opciones útiles:
 El CSV guarda su propio `vcc`, `r_fixed` y topología, así que `fit.py` los
 recupera sin que tengas que repetirlos.
 
-Si calibras **un sensor por sesión**, el CSV seguirá teniendo una fila por
-canal (el otro sensor aparecerá en reposo). `fit.py` omite automáticamente los
-canales sin señal (≤ 30 mV) y lo indica en consola; con `--only S3` o
-`--only S4` fuerzas cuál quieres ajustar.
+Cada sesión nueva guarda **un solo canal** y una fila por punto. El CSV incluye
+`canal=`, `gramos_min`, `gramos_max` y `captura_id` para trazabilidad; `fit.py`
+sigue usando `gramos` y `mv_mean`. Si abres un CSV antiguo con los dos canales,
+`fit.py` omite el que esté en reposo (≤ 30 mV) y lo indica en consola; con
+`--only S3` o `--only S4` fuerzas cuál quieres ajustar.
 
 ---
 

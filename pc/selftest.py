@@ -4,14 +4,18 @@ No necesita hardware. Verifica:
   1. que pyserial/numpy/scipy/matplotlib importan,
   2. que la conversion tension <-> resistencia es consistente,
   3. que el simulador produce lecturas plausibles,
-  4. que el ajuste recupera una ley de potencias conocida.
+  4. que el ajuste recupera una ley de potencias conocida,
+  5. que el ajuste omite canales sin senal y respeta --only,
+  6. que la captura hibrida guarda un canal, CSV v2 y undo correcto.
 
     python pc/selftest.py
 """
 
 from __future__ import annotations
 
+import builtins
 import contextlib
+import csv
 import io
 import math
 import shutil
@@ -197,8 +201,108 @@ def test_capture_pause() -> None:
     check("--pause 0 no espera", time.monotonic() - t0 < 0.5)
 
 
+def test_capture_hybrid() -> None:
+    """Flujo congelar -> anotar, un canal por sesion y CSV version 2."""
+    print("\n7. Captura hibrida (simulada)")
+    from pc import capture
+
+    parser = capture.build_parser()
+    check("--channel por defecto = None", parser.parse_args([]).channel is None)
+    check("--channel acepta 1", parser.parse_args(["--channel", "1"]).channel == 1)
+
+    orig_input = builtins.input
+    try:
+        builtins.input = lambda _prompt: "1000 g"
+        check("ask_grams acepta '1000 g'", capture.ask_grams("x") == 1000.0)
+        builtins.input = lambda _prompt: ""
+        check("ask_grams opcional acepta ENTER",
+              capture.ask_grams("x", optional=True) is None)
+    finally:
+        builtins.input = orig_input
+
+    tmp = Path(tempfile.mkdtemp(prefix="fsr_capture_"))
+    old_raw = fsr.DATA_RAW
+    try:
+        fsr.DATA_RAW = tmp
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = capture.main(["--simulate", "--session", "hibrida",
+                               "--channel", "0", "--sweep", "0,500",
+                               "--reps", "1", "--hold", "0.5",
+                               "--settle", "0", "--pause", "0", "--yes"])
+        csv_path = tmp / "hibrida.csv"
+        check("captura simulada termina bien", rc == 0 and csv_path.exists())
+
+        lines = [ln for ln in csv_path.read_text(encoding="utf-8").splitlines()
+                 if not ln.startswith("#")]
+        header = lines[0].split(",")
+        rows = list(csv.DictReader(lines))
+        check("CSV v2 con 17 columnas", header == capture.FIELDS,
+              f"{len(header)} columnas")
+        check("una fila por punto (un canal)", len(rows) == 2,
+              f"{len(rows)} filas")
+        check("gramos del barrido",
+              [float(r["gramos"]) for r in rows] == [0.0, 500.0])
+        check("referencia simulada sin preguntas",
+              all(r["referencia"] == "simulado" for r in rows))
+        check("min/max rellenados con la referencia",
+              all(r["gramos_min"] == r["gramos"]
+                  and r["gramos_max"] == r["gramos"] for r in rows))
+        meta = capture._read_meta(csv_path)
+        check("metadatos del canal",
+              meta.get("canal") == "0" and meta.get("canales") == "S3",
+              f"canal={meta.get('canal')} canales={meta.get('canales')}")
+
+        args = parser.parse_args(["--simulate", "--channel", "0",
+                                  "--session", "hibrida"])
+        args.session = "hibrida"
+        args.r_fixed = fsr.parse_r_fixed(args.r_fixed, 2)
+        args.fsr_to_vcc = True
+        sess = capture.CaptureSession(args, SimulatedSource(n_ch=2), csv_path)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            sess.undo()
+        left = capture._read_rows(csv_path)
+        check("undo elimina el punto completo", len(left) == 1,
+              f"{len(left)} filas")
+        check("undo informa bien los puntos", "Quedan 1" in buf.getvalue(),
+              buf.getvalue().strip())
+
+        v1 = tmp / "v1.csv"
+        v1.write_text("# vcc=3.27\n# r_fixed=1637\n"
+                      "# topologia=fsr_to_vcc\n# canales=S3,S4\n"
+                      "timestamp,session,ch,nombre,gramos,mv_mean,mv_std,"
+                      "raw_mean,raw_std,n\n", encoding="utf-8")
+        try:
+            capture._init_file(v1, {"vcc": "3.27", "r_fixed": "1637",
+                                    "topologia": "fsr_to_vcc", "canal": "",
+                                    "canales": "S3,S4"})
+            rejected = False
+        except SystemExit:
+            rejected = True
+        check("un CSV v1 se rechaza al capturar", rejected)
+
+        class _FakeSource:
+            n_ch = 2
+
+            def channels_window(self, _seconds):
+                return ([[1.0, 1.0, 1.0, 1.0], [1.0, 2.0, 1.0, 4.0]],
+                        [[0] * 4, [0] * 4])
+
+        fa = parser.parse_args(["--channel", "0", "--session", "estab"])
+        fa.r_fixed = fsr.parse_r_fixed(fa.r_fixed, 2)
+        fa.fsr_to_vcc = True
+        fs = capture.CaptureSession(fa, _FakeSource(), tmp / "estab.csv")
+        only0 = fs._stability(1.0)
+        fa.channel = None
+        both = fs._stability(1.0)
+        check("estabilidad solo del canal elegido",
+              only0 < 1e-9 and both > only0, f"{only0:.2f} / {both:.2f} mV")
+    finally:
+        fsr.DATA_RAW = old_raw
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_round_trip_models() -> None:
-    print("\n7. Persistencia de modelos")
+    print("\n8. Persistencia de modelos")
     tmp = Path(__file__).resolve().parent.parent / "data" / "models"
     jsons = sorted(tmp.glob("*.json")) if tmp.exists() else []
     if not jsons:
@@ -223,6 +327,7 @@ def main() -> int:
     test_fit_recovers_law()
     test_fit_channel_selection()
     test_capture_pause()
+    test_capture_hybrid()
     test_round_trip_models()
 
     print("\n" + "=" * 62)

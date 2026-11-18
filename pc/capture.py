@@ -1,25 +1,34 @@
 """Captura de puntos de calibracion (gramos de la bascula <-> lectura del FSR).
 
+Flujo de captura (congelar primero, anotar despues):
+
+  1. Eliges UN sensor por sesion (`--channel 0` = S3, `1` = S4).
+  2. Pulsas ENTER y el programa captura un intervalo de `--hold` segundos.
+  3. Al terminar, las muestras quedan congeladas: ya puedes soltar el dedo.
+  4. Escribes UN peso observado/predominante en la bascula. Ese valor es el
+     que usara fit.py.
+  5. Opcionalmente anotas minimo y maximo del intervalo. Si los dejas vacios,
+     quedan iguales al peso observado. Son solo anotacion/auditoria.
+
 Dos modos:
 
   INTERACTIVO  (por defecto)
-      Muestra la lectura en vivo. Escribes el peso que marca la bascula,
-      ENTER, y el programa promedia la ultima ventana (`--hold` segundos),
-      te ensena el resultado y te pide confirmacion antes de guardar.
-      ENTER en vacio NO captura: solo refresca la pantalla, para que puedas
-      mirar la senal mientras buscas el peso.
+      ENTER inicia cada intervalo. Despues anotas la referencia y confirmas.
 
   BARRIDO  (--sweep)
       Recorre una lista de pesos. Antes de cada punto hace una pausa
       (`--pause`, 10 s por defecto) para que te de tiempo a quitar la carga
       anterior y aplicar la siguiente. Despues espera a que la senal sea
-      estable y captura solo, sin escribir nada. Ideal para una sesion buena.
+      estable y captura el intervalo. Tambien pide la referencia manual.
+
+Con --simulate no se piden datos manuales: se usa el peso simulado.
 
 Uso:
     python pc/capture.py --port COM4 --session fsr5kg
-    python pc/capture.py --port COM4 --session fsr5kg --sweep 0,100,500,1000,2000,3000,4000,5000
+    python pc/capture.py --port COM4 --session fsr5kg --channel 0
+    python pc/capture.py --port COM4 --session fsr5kg --channel 0 --sweep 0,100,500,1000,2000,3000,4000,5000
     python pc/capture.py --port COM4 --range-check --target 5000
-    python pc/capture.py --simulate --session prueba
+    python pc/capture.py --simulate --session prueba --channel 0
 
 Antes de crear el CSV se comprueba el enlace serie: si la placa tiene el
 firmware antiguo o el puerto esta ocupado, se aborta diciendo exactamente
@@ -31,6 +40,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as _dt
+import math
 import sys
 import time
 from pathlib import Path
@@ -45,8 +55,11 @@ from pc import diagnose, fsr
 from pc.link import FsrSource, SerialSource, SimulatedSource, find_port
 
 FIELDS = ["timestamp", "session", "ch", "nombre", "gramos",
-          "mv_mean", "mv_std", "raw_mean", "raw_std", "n"]
-META_KEYS = ["vcc", "r_fixed", "topologia", "canales"]
+          "mv_mean", "mv_std", "raw_mean", "raw_std", "n",
+          "gramos_min", "gramos_max", "gramos_predominante",
+          "referencia", "captura_id", "duracion_s", "muestras_tramo_s"]
+META_KEYS = ["vcc", "r_fixed", "topologia", "canal", "canales"]
+MIN_SAMPLE_HZ = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +89,11 @@ def _init_file(path: Path, meta: dict[str, str]) -> None:
                     f"ERROR: {path.name} ya existe con {k}={old[k]} y ahora usas "
                     f"{k}={meta[k]}.\n       Usa otra --session para no mezclar "
                     f"configuraciones distintas.")
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            header = next(csv.reader(ln for ln in fh if not ln.startswith("#")), [])
+        if header != FIELDS:
+            raise SystemExit("ERROR: CSV de otra version. Usa otra --session; "
+                             "no se modifico el archivo anterior.")
         return
     with path.open("w", encoding="utf-8", newline="") as fh:
         fh.write("# calibracion FSR - puntos de referencia\n")
@@ -121,13 +139,14 @@ def channel_name(i: int) -> str:
 
 
 def snapshot_text(source: FsrSource, seconds: float,
-                  r_fixed=None) -> str:
+                  r_fixed=None, channel: int | None = None) -> str:
     mv, _raw = source.channels_window(seconds)
     if not mv or len(mv[0]) < 3:
         return "  (sin datos; espera un momento o revisa el puerto)"
 
     out = []
-    for i in range(source.n_ch):
+    shown = range(source.n_ch) if channel is None else [channel]
+    for i in shown:
         m = np.asarray(mv[i], dtype=float)
         r = fsr.ohms_from_mv(float(m.mean()),
                              r_fixed=fsr.r_fixed_for(i, r_fixed))
@@ -180,6 +199,31 @@ def _pause_before_point(grams: float, seconds: float) -> None:
     _countdown(seconds)
 
 
+def ask_grams(prompt: str, minimum: float = 0.0,
+              maximum: float = float("inf"),
+              *, optional: bool = False) -> float | None:
+    """Pide un peso en gramos; ENTER vacio devuelve None si optional."""
+    while True:
+        try:
+            text = input(prompt).strip().lower()
+            if optional and not text:
+                return None
+            for suffix in ("gramos", "gr", "g"):
+                if text.endswith(suffix):
+                    text = text[:-len(suffix)].strip()
+                    break
+            value = float(text.replace(",", "."))
+        except ValueError:
+            print("  Escribe un numero en gramos, sin unidades ni separadores de miles.")
+            continue
+        if math.isfinite(value) and minimum <= value <= maximum:
+            return value
+        msg = f"  Valor invalido: debe ser finito y >= {minimum:g}"
+        if math.isfinite(maximum):
+            msg += f", <= {maximum:g}"
+        print(msg + ".")
+
+
 # ---------------------------------------------------------------------------
 # Comprobacion previa del enlace
 # ---------------------------------------------------------------------------
@@ -225,25 +269,37 @@ class CaptureSession:
         self.args = args
         self.source = source
         self.path = path
+        if args.channel is None:
+            canal = ""
+            canales = ",".join(fsr.CHANNELS[:source.n_ch])
+        else:
+            canal = str(args.channel)
+            canales = channel_name(args.channel)
         self.meta = {
             "vcc": f"{args.vcc:.2f}",
             "r_fixed": fsr.format_r_fixed(args.r_fixed),
             "topologia": fsr.topology_name(args.fsr_to_vcc),
-            "canales": ",".join(fsr.CHANNELS[:source.n_ch]),
+            "canal": canal,
+            "canales": canales,
         }
         _init_file(path, self.meta)
 
     # -- utilidades ---------------------------------------------------------
     def _stability(self, seconds: float) -> float:
         mv, _ = self.source.channels_window(seconds)
-        if not mv or min(len(x) for x in mv) < 3:
+        if not mv:
             return float("inf")
-        return max(np.std(np.asarray(x, dtype=float)) for x in mv)
+        ch = self.args.channel
+        channels = range(self.source.n_ch) if ch is None else [ch]
+        if any(i >= len(mv) or len(mv[i]) < 3 for i in channels):
+            return float("inf")
+        return max(np.std(np.asarray(mv[i], dtype=float)) for i in channels)
 
     def _wait_stable(self) -> bool:
         a = self.args
+        if a.settle > 0:
+            time.sleep(a.settle)
         t0 = time.monotonic()
-        time.sleep(min(0.3, a.settle))
         while True:
             elapsed = time.monotonic() - t0
             sd = self._stability(a.stab_window)
@@ -269,41 +325,128 @@ class CaptureSession:
 
     # -- medidas ------------------------------------------------------------
     def _measure(self, grams: float, settle: bool) -> list[dict]:
+        """Captura un intervalo y congela las muestras antes de anotar nada."""
         a = self.args
-        if settle and isinstance(self.source, SimulatedSource):
-            # El simulador necesita "sentir" el peso: se aplica y se espera
-            # la ventana de promedio (con margen para que no queden muestras
-            # del peso anterior dentro de la ventana).
+        if isinstance(self.source, SimulatedSource):
             self.source.set_weight(grams)
-            time.sleep(a.hold + 0.5)
+            if not (settle and a.settle > 0):
+                # Deja que el simulador genere muestras YA con el peso nuevo;
+                # si no, la primera muestra del intervalo puede ser del peso
+                # anterior y dispara mv_std.
+                time.sleep(0.3)
 
-        mv, raw = self.source.channels_window(a.hold)
-        if not mv or min(len(x) for x in mv) < 5:
-            print("  [!] muy pocas muestras en la ventana; aumenta --hold o "
-                  "revisa la conexion. Punto NO guardado.")
+        if settle and a.settle > 0:
+            print(f"  Preparacion: {a.settle:g} s. Todavia NO se registra.")
+            time.sleep(a.settle)
+
+        print(f"  INICIO: observa la bascula durante {a.hold:g} s.")
+        start = time.monotonic()
+        end = start + a.hold
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            sys.stdout.write(f"\r  CAPTURANDO: faltan {left:4.1f} s   ")
+            sys.stdout.flush()
+            time.sleep(min(0.1, left))
+
+        # Filtra por reloj local de recepcion, no por la ultima muestra:
+        # una desconexion no debe reutilizar lecturas antiguas del buffer.
+        samples = [item for item in self.source.snapshot()
+                   if start <= item[0] <= end]
+        print("\r  FIN: muestras congeladas. Ya puedes soltar el dedo.   ")
+
+        if len(samples) < 5:
+            print("  [!] Muy pocas muestras NUEVAS. Punto NO guardado.")
+            return []
+        span = samples[-1][0] - samples[0][0]
+        if span <= 0:
+            print("  [!] Las muestras no tienen una ventana temporal valida.")
+            return []
+        hz = len(samples) / span
+        if hz < MIN_SAMPLE_HZ:
+            print(f"  [!] Frecuencia efectiva muy baja ({hz:.1f} Hz). "
+                  f"Punto NO guardado; revisa el enlace.")
+            return []
+        edge = max(0.25, a.hold * 0.2)
+        gap = max(0.5, a.hold * 0.2)
+        if (samples[0][0] - start > edge
+                or end - samples[-1][0] > edge
+                or any(y[0] - x[0] > gap
+                       for x, y in zip(samples, samples[1:]))):
+            print("  [!] Faltaron datos durante el intervalo. Repite la captura.")
             return []
 
-        stamp = _dt.datetime.now().isoformat(timespec="seconds")
+        stamp = _dt.datetime.now().isoformat(timespec="microseconds")
+        channels = (range(self.source.n_ch) if a.channel is None
+                    else [a.channel])
         rows: list[dict] = []
-        for i in range(self.source.n_ch):
-            m = np.asarray(mv[i], dtype=float)
-            r = np.asarray(raw[i], dtype=float)
+        for i in channels:
+            m = np.asarray([item[2][i] for item in samples], dtype=float)
+            r = np.asarray([item[1][i] for item in samples], dtype=float)
+            if not (np.isfinite(m).all() and np.isfinite(r).all()):
+                print("  [!] Muestras no finitas. Punto NO guardado.")
+                return []
             rows.append({
                 "timestamp": stamp,
                 "session": a.session,
                 "ch": i,
                 "nombre": channel_name(i),
-                "gramos": f"{grams:.1f}",
+                "gramos": f"{grams:.3f}",
                 "mv_mean": f"{m.mean():.2f}",
-                "mv_std": f"{(m.std(ddof=1) if m.size > 1 else 0.0):.3f}",
+                "mv_std": f"{m.std(ddof=1):.3f}",
                 "raw_mean": f"{r.mean():.2f}",
-                "raw_std": f"{(r.std(ddof=1) if r.size > 1 else 0.0):.3f}",
+                "raw_std": f"{r.std(ddof=1):.3f}",
                 "n": int(m.size),
+                "gramos_min": "",
+                "gramos_max": "",
+                "gramos_predominante": "",
+                "referencia": "",
+                "captura_id": stamp,
+                "duracion_s": f"{a.hold:.3f}",
+                "muestras_tramo_s": f"{span:.3f}",
             })
         return rows
 
+    def _reference(self, rows: list[dict]) -> float:
+        """Pide el peso observado; minimo/maximo son anotacion opcional."""
+        simulated = isinstance(self.source, SimulatedSource)
+        if simulated:
+            reference = float(rows[0]["gramos"])
+            minimum = maximum = reference
+            print(f"  Referencia simulada: {reference:g} g.")
+        else:
+            print("  Anota lo observado SOLO durante el intervalo de captura.")
+            print("  Unidades: gramos. Sin separadores de miles; decimal con punto o coma.")
+            reference = ask_grams("  Peso observado/predominante (g): ")
+            minimum = ask_grams(
+                "  Peso MINIMO observado (g) [ENTER = mismo]: ",
+                maximum=reference, optional=True)
+            maximum = ask_grams(
+                "  Peso MAXIMO observado (g) [ENTER = mismo]: ",
+                minimum=reference, optional=True)
+            if minimum is None:
+                minimum = reference
+            if maximum is None:
+                maximum = reference
+
+        for row in rows:
+            row.update(
+                gramos=f"{reference:.3f}",
+                gramos_min=f"{minimum:.3f}",
+                gramos_max=f"{maximum:.3f}",
+                gramos_predominante=f"{reference:.3f}",
+                referencia="simulado" if simulated else "manual_estable",
+            )
+        if not simulated:
+            print(f"  Referencia: {reference:g} g; rango anotado "
+                  f"{minimum:g}..{maximum:g} g.")
+            print("  fit.py usara el peso observado; el rango es solo anotacion.")
+        return reference
+
     def _print_rows(self, rows: list[dict], grams: float) -> None:
         print("  --- punto medido ---")
+        floor_mv = fsr.ADC_FLOOR_V * 1000.0
         resting = True
         for row in rows:
             mv = float(row["mv_mean"])
@@ -311,11 +454,11 @@ class CaptureSession:
             print(f"  {row['nombre']:>3}  gramos={grams:7.1f}  mv={mv:8.1f} "
                   f"+/-{sd:5.2f}  n={row['n']}")
             _warn_saturation(mv, row["nombre"])
-            if mv > fsr.ADC_MIN_V * 1000.0:
+            if mv > floor_mv:
                 resting = False
         if grams > 0 and resting:
-            print("  [!] La senal sigue en reposo (<30 mV) con ese peso puesto.")
-            print("      Puede que el sensor no este presionando: usa 'r' para repetir.")
+            print(f"  [!] La senal sigue en reposo (<{floor_mv:.0f} mV) con ese peso.")
+            print("      Puede que el sensor no este presionando: repite la captura.")
 
     # -- captura ------------------------------------------------------------
     def take_point(self, grams: float, *, show: bool = True,
@@ -324,8 +467,9 @@ class CaptureSession:
             rows = self._measure(grams, settle)
             if not rows:
                 return []
+            reference = self._reference(rows)
             if show:
-                self._print_rows(rows, grams)
+                self._print_rows(rows, reference)
             if not confirm:
                 break
             ans = input("  Guardar este punto? [S/n/r] ").strip().lower()
@@ -345,11 +489,14 @@ class CaptureSession:
         if not rows:
             print("  (no hay puntos que deshacer)")
             return
-        last_ts = rows[-1]["timestamp"]
-        kept = [r for r in rows if r["timestamp"] != last_ts]
+        last_id = rows[-1].get("captura_id") or rows[-1].get("timestamp")
+        kept = [r for r in rows
+                if (r.get("captura_id") or r.get("timestamp")) != last_id]
         _rewrite_rows(self.path, kept)
+        points_left = len({r.get("captura_id") or r.get("timestamp")
+                           for r in kept})
         print(f"  deshecho: {len(rows) - len(kept)} filas "
-              f"({last_ts}). Quedan {len(kept) // max(1, self.source.n_ch)} puntos.")
+              f"({last_id}). Quedan {points_left} puntos.")
 
     def list_points(self) -> None:
         rows = _read_rows(self.path)
@@ -454,11 +601,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Captura de puntos para calibrar FSR contra una bascula.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--channel", type=int,
+                   help="sensor de esta sesion: 0=S3, 1=S4")
     p.add_argument("--port", help="puerto serie (ej. COM4). Si se omite, autodetecta")
     p.add_argument("--baud", type=int, default=fsr.BAUDRATE)
     p.add_argument("--session", help="nombre de la sesion (nombre del CSV)")
     p.add_argument("--hold", type=float, default=3.0,
-                   help="segundos que se promedian por punto")
+                   help="duracion del intervalo de captura, en segundos")
     p.add_argument("--vcc", type=float, default=fsr.VCC_VOLTS,
                    help="voltaje real del riel 3V3 (mideal con multimetro)")
     p.add_argument("--r-fixed", default=str(fsr.R_FIXED_OHMS),
@@ -496,6 +645,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     n_ch = len(fsr.CHANNELS)
+    if not math.isfinite(args.hold) or not 0.5 <= args.hold <= 300:
+        raise SystemExit("--hold debe estar entre 0.5 y 300 segundos.")
+    if not math.isfinite(args.settle) or not 0 <= args.settle <= 60:
+        raise SystemExit("--settle debe estar entre 0 y 60 segundos.")
+    if not math.isfinite(args.pause) or args.pause < 0:
+        raise SystemExit("--pause debe ser un numero de segundos >= 0.")
+    if args.reps < 1:
+        raise SystemExit("--reps debe ser >= 1.")
+    if args.channel is not None and not 0 <= args.channel < n_ch:
+        raise SystemExit(f"--channel debe estar entre 0 y {n_ch - 1}.")
 
     try:
         args.r_fixed = fsr.parse_r_fixed(args.r_fixed, n_ch)
@@ -505,6 +664,7 @@ def main(argv=None) -> int:
 
     session = args.session or _dt.datetime.now().strftime("sesion_%Y%m%d_%H%M%S")
     session = "".join(c if c.isalnum() or c in "-_." else "_" for c in session)
+    args.session = session
     path = fsr.DATA_RAW / f"{session}.csv"
 
     if args.simulate:
@@ -532,11 +692,11 @@ def main(argv=None) -> int:
     print(f"  archivo   : {path}")
     print(f"  divisor   : R_fixed={fsr.format_r_fixed(args.r_fixed)} ohm, "
           f"VCC={args.vcc:.2f} V, {args.topology}")
-    print(f"  promediado: {args.hold:.1f} s por punto")
+    print(f"  intervalo : {args.hold:.1f} s de captura por punto")
     print()
-    print("  Recuerda: disco rigido del mismo diametro que el pad activo del FSR,")
-    print("  siempre en el mismo sitio, y tara la bascula con el disco encima.")
-    print("  Se guardan los dos canales; el que no cargues se omite en fit.py.")
+    print("  Tara la bascula con el sensor y su soporte; presiona solo sobre el FSR.")
+    print("  Al terminar el intervalo puedes soltar el dedo y anotar el peso.")
+    print("  Se guarda un solo canal por sesion.")
     print()
 
     source.start()
@@ -550,14 +710,29 @@ def main(argv=None) -> int:
             range_check(source, args)
             return 0
 
+        if args.channel is None:
+            print("  Elige UN sensor para esta sesion:")
+            for i in range(n_ch):
+                print(f"    {i} = {channel_name(i)}")
+            while True:
+                chosen = input("  Sensor (indice): ").strip()
+                if chosen.isdigit() and 0 <= int(chosen) < n_ch:
+                    args.channel = int(chosen)
+                    break
+                print("  Escribe uno de los indices indicados.")
+        print(f"  canal     : {channel_name(args.channel)} "
+              f"(indice {args.channel})")
+        print()
+
         sess = CaptureSession(args, source, path)
         wrote_csv = True
         if args.sweep:
             _run_sweep(sess, args, source)
         else:
             _run_interactive(sess, args, source)
-    except KeyboardInterrupt:
-        print("\n  interrumpido por el usuario")
+    except (KeyboardInterrupt, EOFError):
+        print("\n  Finalizado. El punto pendiente no se guarda; "
+              "los anteriores se conservan.")
     finally:
         source.stop()
 
@@ -580,7 +755,7 @@ def _run_sweep(sess: CaptureSession, args, source: FsrSource) -> None:
     if args.pause > 0 and not isinstance(source, SimulatedSource):
         print(f"  Antes de cada punto: {args.pause:g} s para quitar/aplicar la "
               f"carga (ENTER salta la espera).")
-    print("  Para cada peso: aplicalo, mantenlo y espera. Se captura solo.")
+    print("  Para cada peso: mantenlo; despues anota el peso observado.")
     done = 0
     for grams in targets:
         for rep in range(args.reps):
@@ -599,32 +774,40 @@ def _run_sweep(sess: CaptureSession, args, source: FsrSource) -> None:
                 print("      [!] no se estabilizo a tiempo; capturo igual. "
                       "Revisa mv_std del punto.")
             print("      lectura:", end="")
-            print("\n" + snapshot_text(source, args.stab_window, args.r_fixed))
-            sess.take_point(grams, settle=False)
+            print("\n" + snapshot_text(source, args.stab_window, args.r_fixed,
+                                       channel=args.channel))
+            sess.take_point(grams, settle=False,
+                            confirm=not args.yes
+                            and not isinstance(source, SimulatedSource))
 
 
 def _run_interactive(sess: CaptureSession, args, source: FsrSource) -> None:
     print("  COMO TOMAR UN PUNTO")
-    print("    1. Apoya el sensor y tara la bascula con el disco encima.")
-    print("    2. Aplica el peso y MANTENLO.")
-    print("    3. Escribe cuantos gramos marca la bascula y pulsa ENTER.")
-    print("    4. Revisa la medida y confirma con S (o repite con r).")
+    print("    1. Tara la bascula con el sensor y su soporte.")
+    print(f"    2. Pulsa ENTER y manten la fuerza durante {args.hold:g} s.")
+    print("    3. Al terminar puedes soltar el dedo: las muestras ya estan congeladas.")
+    print("    4. Escribe el peso observado; minimo y maximo son opcionales.")
+    print("    5. Confirma con S (o repite con r).")
     print()
-    print("  ENTER en vacio solo refresca la lectura, no guarda nada.")
+    print("  ENTER en vacio inicia una captura nueva.")
     print("  u = deshacer | l = listar | q = salir | ? = ayuda")
+    prompt = ("\n  ENTER para capturar / objetivo simulado (g) / comando > "
+              if args.simulate
+              else "\n  ENTER para capturar / comando > ")
     while True:
-        print(f"\n  Lectura en vivo (ventana {args.hold:g} s):")
-        print(snapshot_text(source, args.hold, args.r_fixed))
+        print(f"\n  Lectura reciente (ventana {args.hold:g} s):")
+        print(snapshot_text(source, args.hold, args.r_fixed,
+                            channel=args.channel))
         try:
-            raw = input("\n  gramos en la bascula > ").strip()
+            raw = input(prompt).strip()
         except EOFError:
             break
         low = raw.lower()
         if low in ("q", "quit", "exit"):
             break
         if low in ("h", "?", "help"):
-            print("  Escribe el peso y ENTER para medir.")
-            print("  ENTER vacio refresca | u deshace | l lista | q sale")
+            print("  ENTER: captura un intervalo -> peso observado -> min/max opcionales.")
+            print("  u deshace el ultimo punto, l lista, q sale.")
             continue
         if low in ("u", "undo"):
             sess.undo()
@@ -632,19 +815,23 @@ def _run_interactive(sess: CaptureSession, args, source: FsrSource) -> None:
         if low in ("l", "list"):
             sess.list_points()
             continue
-        if not raw:
+        if raw and not args.simulate:
+            print("  En hardware real se captura primero y se anota el peso despues.")
+            print("  Pulsa ENTER para iniciar el intervalo.")
             continue
         try:
-            grams = float(raw.replace(",", ".").replace("g", "").strip())
+            grams = (float(raw.replace(",", ".").replace("g", "").strip())
+                     if raw else (1000.0 if args.simulate else 0.0))
         except ValueError:
-            print("  [!] no entiendo ese valor; escribe solo el numero")
+            print("  Escribe un numero, comando o ENTER.")
             continue
-        if grams < 0:
-            print("  [!] el peso no puede ser negativo")
+        if not math.isfinite(grams) or grams < 0:
+            print("  El objetivo debe ser finito y no negativo.")
             continue
-        if isinstance(source, SimulatedSource):
+        if raw and args.simulate:
             print(f"  (simulador: aplicando {grams:g} g durante {args.hold:g} s...)")
-        sess.take_point(grams, confirm=not args.yes)
+        sess.take_point(grams, confirm=not args.yes
+                        and not isinstance(source, SimulatedSource))
 
 
 if __name__ == "__main__":

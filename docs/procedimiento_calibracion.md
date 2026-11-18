@@ -79,11 +79,13 @@ campaña de medidas.
    Después mira el ruido en vivo:
 
    ```powershell
-   .\.venv\Scripts\python.exe pc\capture.py --port COM5 --session ruido --hold 2.5
+   .\.venv\Scripts\python.exe pc\capture.py --port COM5 --session ruido `
+       --channel 0 --hold 2.5
    ```
 
-   Mira `+/-` en la línea de lectura sin presionar. Criterio: **< 3 mV**. Si
-   es mayor, cables más cortos, 100 nF en el nodo y/o sube `OVERSAMPLE` a 64.
+   Mira `+/-` en la línea de lectura sin presionar y sal con `q` sin capturar.
+   Criterio: **< 3 mV**. Si es mayor, cables más cortos, 100 nF en el nodo y/o
+   sube `OVERSAMPLE` a 64.
 5. Deja la placa encendida **2 minutos** antes de empezar (el regulador y el
    ADC se estabilizan).
 
@@ -184,16 +186,17 @@ Si tu `--range-check` sale por encima de 2,45 V, pasa a 1 kΩ.
 
 ### 5.1 Puntos
 
-Para un rango de 0–5 kg con `R_fija = 1,63 kΩ`:
+Para un rango de 0–5 kg con `R_fija = 1,63 kΩ`, la lista recomendada es:
 
 ```
-0, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000 g
+0, 250, 500, 750, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500 g
 ```
 
 Los primeros 100 g caen muy abajo (~140 mV), así que no añadas puntos por
-debajo salvo que te interese esa zona. El punto de 5000 g está cerca del techo
-fiable: si `--range-check` lo deja por encima de 2450 mV, marca los puntos
-altos como "informativos" o pasa a 1 kΩ.
+debajo salvo que te interese esa zona. **No se calibra a 5000 g**: la báscula se
+reinicia justo a 5 kg. Se mide hasta 4500 g, que es una referencia estable, y el
+modelo extrapola el último 10 %. Eso se declara como limitación; no se inventa
+el punto de 5 kg.
 
 - **0 g** se captura en reposo (sin tocar). No entra en el ajuste logarítmico,
   pero es tu referencia de offset y sirve para verificar que no hay señal
@@ -210,30 +213,42 @@ altos como "informativos" o pasa a 1 kΩ.
 - Mantén la carga **2–3 segundos** antes de capturar. El FSR tiene un
   asentamiento inicial rápido; capturar en el primer instante da lecturas
   altas.
+- La captura congela primero y anota después: cuando el intervalo termina,
+  puedes soltar el dedo y escribir el peso **observado durante ese intervalo**.
+  No escribas un peso que no hayas visto en la báscula.
 - Captura solo cuando la báscula esté quieta. El script avisa si `mv_std`
   es alto.
 
 ### 5.3 Barrido guiado (recomendado)
 
 ```powershell
-.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg `
-    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
-    --reps 2 --hold 2.0 --pause 10 --vcc 3.27 --r-fixed 1633,1641
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg_S3 `
+    --channel 0 `
+    --sweep 0,250,500,750,1000,1500,2000,2500,3000,3500,4000,4500 `
+    --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
+    --vcc 3.27 --r-fixed 1633,1641
 ```
 
+Cada sesión calibra **un solo sensor** (`--channel 0` = S3, `--channel 1` = S4).
 Antes de cada punto hay una cuenta atrás de **10 s** (`--pause`): úsala para
 quitar la carga del punto anterior y aplicar la nueva sin prisas. Pulsa ENTER
 si ya estás listo para medir antes de que termine. Después el script espera a
-que la desviación baje de 3 mV en 1 s. Si no lo consigue en 15 s, captura igual
-y te avisa: ese punto probablemente sea basura, revisa su `mv_std` antes de
-aceptarlo.
+que la desviación del canal elegido baje de 3 mV en 1 s. Si no lo consigue en
+15 s, captura igual y te avisa: ese punto probablemente sea basura, revisa su
+`mv_std` antes de aceptarlo.
+
+Al terminar el intervalo el script congela las muestras, te avisa de que puedes
+soltar el dedo y te pide el peso observado. Mínimo y máximo son opcionales: si
+los dejas vacíos quedan iguales al peso observado y solo sirven como anotación.
+`fit.py` usa el peso observado, no un punto medio calculado.
 
 ### 5.4 Histéresis (opcional pero muy informativo)
 
 Repite el barrido **de bajada** en una sesión distinta:
 
 ```powershell
---session fsr5kg_bajada --sweep 5000,4000,3000,2000,1500,1000,750,500,300,200,100
+--session fsr5kg_S3_bajada --channel 0 `
+--sweep 4500,4000,3500,3000,2500,2000,1500,1000,750,500,250
 ```
 
 Ajusta las dos sesiones por separado y compara. La diferencia entre ambas
@@ -249,21 +264,26 @@ El CSV (`data/raw/<sesion>.csv`) guarda por punto:
 
 | Columna | Para qué |
 |---|---|
-| `gramos` | referencia de la báscula |
+| `gramos` | peso observado/predominante; es la referencia que usa el ajuste |
 | `mv_mean`, `mv_std` | lectura promediada y su dispersión (control de calidad) |
 | `raw_mean`, `raw_std` | cuentas del ADC, por si quieres rehacer la conversión |
-| `n` | muestras promediadas (ventana × 25 Hz) |
+| `n` | muestras del intervalo (≈ `--hold` × 25 Hz) |
+| `gramos_min`, `gramos_max` | rango observado; anotación opcional, no entra al ajuste |
+| `gramos_predominante` | copia del peso observado, para auditoría |
+| `referencia` | `manual_estable` o `simulado` |
+| `captura_id` | identifica el punto completo; lo usa `undo` |
+| `duracion_s`, `muestras_tramo_s` | duración configurada y tiempo real cubierto |
 | `timestamp` | trazabilidad |
 
-Las cabeceras `# vcc=`, `# r_fixed=` y `# topologia=` quedan grabadas en el
-propio archivo: el ajuste usa esos valores, no los de por defecto. Así un CSV
-antiguo sigue siendo reproducible. `r_fixed` puede ser un valor por canal
-(`1633/1641`): cada fila se convierte con el de su sensor.
+Las cabeceras `# vcc=`, `# r_fixed=`, `# topologia=` y `# canal=` quedan
+grabadas en el propio archivo: el ajuste usa esos valores, no los de por
+defecto. Así un CSV antiguo sigue siendo reproducible. `r_fixed` puede ser un
+valor por canal (`1633/1641`): cada fila se convierte con el de su sensor.
 
-Cada peso genera **una fila por canal**. Si calibras un sensor por sesión, el
-otro aparecerá en reposo (~0–1 mV). `fit.py` lo detecta (< 30 mV), lo omite y
-avisa; no genera un modelo basura. Para forzar uno concreto:
-`--only S3` o `--only S4`.
+Cada sesión nueva calibra **un solo sensor** y guarda **una fila por punto**.
+Si abres un CSV antiguo con los dos canales, `fit.py` detecta el que está en
+reposo (< 30 mV), lo omite y avisa; no genera un modelo basura. Para forzar uno
+concreto: `--only S3` o `--only S4`.
 
 Anota aparte (cuaderno): fecha, temperatura ambiente, si cambiaste el disco,
 y cualquier golpe o doblez del sensor durante la sesión.
@@ -279,9 +299,9 @@ La referencia completa de cada opción está en
 .\.venv\Scripts\python.exe pc\fit.py --csv data\raw\fsr5kg.csv --show
 ```
 
-Si calibraste un solo sensor en esa sesión, añade `--only S3` o `--only S4` para
-dejar claro cuál quieres ajustar. Si el otro canal no tiene señal, se omite
-automáticamente.
+Cada sesión nueva contiene un solo sensor, así que `--only S3` o `--only S4` es
+opcional; úsalo para dejar clara la intención. Si abres un CSV antiguo con los
+dos canales y el otro no tiene señal, se omite automáticamente.
 
 Qué mirar, en este orden:
 
@@ -335,6 +355,9 @@ LOOCV está dentro del criterio. `fit.py` ya genera `calibration.h` con M1.
    de escala.
 7. **Extrapolar fuera del rango medido** → un FSR es monótono, pero el error
    crece rápido fuera de la zona caracterizada.
+8. **Anotar un peso que no observaste** o usar el punto medio del rango como
+   referencia → el ajuste aprende una relación que no ocurrió. Escribe el peso
+   predominante que viste durante el intervalo congelado.
 
 ---
 
@@ -353,15 +376,19 @@ Resumen de extremo a extremo, con los comandos en orden:
 # 4. Decidir la resistencia con la carga real de 5 kg
 .\.venv\Scripts\python.exe pc\capture.py --port COM5 --range-check --target 5000
 
-# 5. Capturar el barrido (2 repeticiones por peso, 10 s entre puntos)
-.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg `
-    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
-    --reps 2 --hold 2.0 --pause 10 --vcc 3.27 --r-fixed 1633,1641
+# 5. Capturar S3 (un sensor por sesion, 2 reps, 10 s entre puntos)
+.\.venv\Scripts\python.exe pc\capture.py --port COM5 --session fsr5kg_S3 `
+    --channel 0 `
+    --sweep 0,250,500,750,1000,1500,2000,2500,3000,3500,4000,4500 `
+    --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
+    --vcc 3.27 --r-fixed 1633,1641
 
-# 6. Ajustar y evaluar
-.\.venv\Scripts\python.exe pc\fit.py --csv data\raw\fsr5kg.csv --show
+# 6. Repetir para S4 con --session fsr5kg_S4 --channel 1
 
-# 7. Validar con un peso conocido
+# 7. Ajustar y evaluar
+.\.venv\Scripts\python.exe pc\fit.py --csv data\raw\fsr5kg_S3.csv --show
+
+# 8. Validar con un peso conocido
 .\.venv\Scripts\python.exe pc\live.py --port COM5 --models data\models
 ```
 

@@ -151,12 +151,31 @@ pudo abrir el puerto.
 
 ## 5. `capture.py` — captura de puntos y comprobación de rango
 
-Es el script que más vas a usar. Tiene tres modos:
+Es el script que más vas a usar. La captura funciona en este orden:
 
-1. **Interactivo** (por defecto): tú escribes el peso de la báscula.
-2. **Barrido** (`--sweep`): recorre una lista y espera estabilidad.
+1. Pulsas ENTER y se captura un intervalo de `--hold` segundos.
+2. Al terminar, las muestras quedan **congeladas**: ya puedes soltar el dedo.
+3. Escribes **un solo peso observado/predominante** en la báscula.
+4. Opcionalmente anotas el mínimo y el máximo vistos. Si los dejas vacíos,
+   quedan iguales al peso observado y son solo anotación.
+
+Ese peso observado es el valor que va a `gramos` y el que usa `fit.py`. **No se
+calcula un punto medio ni una media inventada**: la referencia es la que tú
+observaste.
+
+Tiene tres modos:
+
+1. **Interactivo** (por defecto): ENTER inicia cada intervalo y después anotas
+   la referencia.
+2. **Barrido** (`--sweep`): recorre una lista, espera estabilidad y captura el
+   intervalo. También pide la referencia manual.
 3. **Comprobación de rango** (`--range-check`): mide el pico y recomienda
    `R_fija`. No escribe CSV.
+
+**Un solo sensor por sesión:** `--channel 0` es S3 y `--channel 1` es S4. Si no
+lo pasas, el script lo pregunta al inicio. El CSV guarda solo ese canal y sus
+metadatos (`# canal=`, `# canales=`). Si intentas reutilizar la misma sesión con
+otro canal o con otra configuración, se niega para no mezclar curvas.
 
 Antes de crear el CSV hace un **preflight**: si el firmware es antiguo o el
 puerto está ocupado, aborta sin dejar un archivo vacío.
@@ -164,20 +183,21 @@ puerto está ocupado, aborta sin dejar un archivo vacío.
 **Uso básico:**
 
 ```powershell
-python pc\capture.py --port COM4 --session fsr5kg
-python pc\capture.py --port COM4 --session fsr5kg --sweep 0,500,1000,2000,5000
+python pc\capture.py --port COM4 --session fsr5kg_S3 --channel 0
+python pc\capture.py --port COM4 --session fsr5kg_S3 --channel 0 --sweep 0,500,1000,2000,4500
 python pc\capture.py --port COM4 --range-check --target 5000
-python pc\capture.py --simulate --session prueba
+python pc\capture.py --simulate --session prueba --channel 0
 ```
 
 **Opciones:**
 
 | Opción | Defecto | Para qué |
 |---|---|---|
+| `--channel` | pregunta | sensor de la sesión: `0` = S3, `1` = S4 |
 | `--port` | autodetecta | puerto serie |
 | `--baud` | `115200` | baudrate |
 | `--session` | `sesion_AAAAMMDD_HHMMSS` | nombre del CSV en `data/raw/` |
-| `--hold` | `3.0` | segundos promediados por punto |
+| `--hold` | `3.0` | duración del intervalo de captura, en segundos (0,5–300) |
 | `--vcc` | `3.27` | tensión real del riel |
 | `--r-fixed` | `1637.0` | resistencia fija; admite `1633,1641` por canal |
 | `--topology` | `fsr_to_vcc` | orientación del divisor |
@@ -197,31 +217,43 @@ python pc\capture.py --simulate --session prueba
 ### 5.1 Modo interactivo
 
 ```
-  Lectura en vivo (ventana 3 s):
+  Lectura reciente (ventana 3 s):
     S3  mv=   412.3 +/-  1.9  R=    10.0 kohm  n=75
-    S4  mv=   398.0 +/-  2.2  R=    10.5 kohm  n=75
 
-  gramos en la bascula >
+  ENTER para capturar / comando >
 ```
 
 | Entrada | Efecto |
 |---|---|
-| un número (`1000`) | mide y pide confirmación `[S/n/r]` |
-| ENTER vacío | solo refresca la lectura, **no guarda** |
-| `u` | deshace el último punto |
+| ENTER vacío | inicia el intervalo y **congela** las muestras |
+| `u` | deshace el último punto completo |
 | `l` | lista los puntos guardados |
 | `q` | termina y guarda |
 | `?` | ayuda |
 
-La confirmación `[S/n/r]` evita guardar un punto malo: `S` guarda, `n` descarta,
-`r` repite la medida.
+Al terminar el intervalo aparece:
+
+```
+  FIN: muestras congeladas. Ya puedes soltar el dedo.
+  Peso observado/predominante (g): 1000
+  Peso MINIMO observado (g) [ENTER = mismo]:
+  Peso MAXIMO observado (g) [ENTER = mismo]:
+```
+
+Después muestra el resultado y pide confirmación `[S/n/r]`: `S` guarda, `n`
+descarta y `r` repite la captura.
+
+En hardware real no escribas el peso antes de capturar: primero se mide y
+después se anota. En `--simulate` puedes escribir un objetivo en gramos para
+elegir el peso simulado; sin número usa 1000 g.
 
 ### 5.2 Modo barrido
 
 ```powershell
-python pc\capture.py --port COM4 --session fsr5kg `
-    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
-    --reps 2 --hold 2.0 --vcc 3.27 --r-fixed 1633,1641
+python pc\capture.py --port COM4 --session fsr5kg_S3 --channel 0 `
+    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,4500 `
+    --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
+    --vcc 3.27 --r-fixed 1633,1641
 ```
 
 Antes de cada punto muestra una cuenta atrás de `--pause` segundos (10 por
@@ -229,9 +261,16 @@ defecto): es el tiempo para **quitar la carga anterior y aplicar la siguiente**.
 Puedes terminar la espera antes pulsando ENTER. Con `--pause 0` el barrido
 avanza sin pausa (útil solo con pesos automáticos).
 
-Después espera a que la desviación baje de `--stab-mv` durante `--stab-window`.
-Si no lo consigue en `--stab-timeout`, captura igual y avisa. **Revisa el
-`mv_std` de ese punto antes de fiarte.**
+Después espera a que la desviación del **canal elegido** baje de `--stab-mv`
+durante `--stab-window`. Si no lo consigue en `--stab-timeout`, captura igual y
+avisa. **Revisa el `mv_std` de ese punto antes de fiarte.**
+
+Tras congelar las muestras, el barrido también pide la referencia manual y
+confirma antes de guardar, salvo que uses `--yes` o `--simulate`.
+
+La lista recomendada termina en **4500 g**, no en 5000 g: la báscula se
+reinicia justo a 5 kg y el último 10 % se extrapola. Es una limitación
+declarada, no un punto inventado.
 
 ### 5.3 Comprobación de rango
 
@@ -261,29 +300,40 @@ No crea CSV. Es el paso que decide si necesitas `1k` en vez de `1,67k`.
 # vcc=3.27
 # r_fixed=1633/1641
 # topologia=fsr_to_vcc
-# canales=S3,S4
+# canal=0
+# canales=S3
 # creado=2026-11-11T18:22:01
-timestamp,session,ch,nombre,gramos,mv_mean,mv_std,raw_mean,raw_std,n
+timestamp,session,ch,nombre,gramos,mv_mean,mv_std,raw_mean,raw_std,n,gramos_min,gramos_max,gramos_predominante,referencia,captura_id,duracion_s,muestras_tramo_s
 ```
 
 | Columna | Significado |
 |---|---|
-| `timestamp` | instante del punto |
+| `timestamp` | inicio del intervalo capturado |
 | `session` | nombre de la sesión |
 | `ch`, `nombre` | índice y nombre del canal (`S3`, `S4`) |
-| `gramos` | referencia de la báscula |
+| `gramos` | peso observado/predominante; es el valor que usa `fit.py` |
 | `mv_mean`, `mv_std` | tensión promediada y su dispersión |
 | `raw_mean`, `raw_std` | cuentas del ADC (por si quieres rehacer la conversión) |
-| `n` | muestras promediadas (`--hold` × 25 Hz) |
+| `n` | muestras del intervalo (≈ `--hold` × 25 Hz) |
+| `gramos_min`, `gramos_max` | rango observado; anotación opcional |
+| `gramos_predominante` | copia del peso observado (trazabilidad) |
+| `referencia` | `manual_estable` o `simulado` |
+| `captura_id` | identificador único del punto; lo usa `undo` |
+| `duracion_s` | duración configurada del intervalo |
+| `muestras_tramo_s` | tiempo real cubierto por las muestras congeladas |
 
-Si reutilizas una sesión con otro `vcc`, `r_fixed`, topología o número de
-canales, el script se niega: usa otra `--session` para no mezclar
-configuraciones.
+`gramos_min` y `gramos_max` **no se usan para ajustar**. Sirven para auditar la
+variabilidad del pulso. `fit.py` lee `gramos` y `mv_mean`; no calcula medias ni
+puntos medios a partir de ellos.
 
-**Una fila por canal:** cada peso genera dos filas (una de S3 y otra de S4),
-aunque solo estés cargando un sensor. Es intencionado: así puedes calibrar los
-dos a la vez si comparten carga, y el sensor en reposo sirve de control.
-`fit.py` omite el canal sin señal; no hace falta borrar filas del CSV.
+Si reutilizas una sesión con otro `vcc`, `r_fixed`, topología o canal, el script
+se niega: usa otra `--session` para no mezclar configuraciones. Un CSV de una
+versión anterior también se rechaza al capturar; `fit.py` sí puede leerlo para
+auditar sesiones viejas.
+
+**Una fila por punto y canal:** como ahora se guarda un solo canal por sesión,
+cada peso genera **una fila**. `fit.py` no necesita `--only` para esa sesión,
+aunque puedes pasarlo para dejar clara tu intención.
 
 ---
 
@@ -315,8 +365,9 @@ python pc\fit.py --csv data\raw\fsr5kg.csv --vcc 3.27 --r-fixed 1633,1641
 | `--show` | no | abre las gráficas |
 | `--no-header` | no | no genera `calibration.h` |
 
-**Canales sin señal:** si calibras un sensor por sesión, el otro canal queda en
-reposo (~0–1 mV). `fit.py` lo detecta (< 30 mV), lo omite y avisa:
+**Canales sin señal:** en sesiones nuevas ya se guarda un solo canal. Si abres
+un CSV antiguo que contiene los dos, `fit.py` detecta el que quedó en reposo
+(~0–1 mV), lo omite y avisa:
 
 ```text
   [ ] S4: sin senal (max 1.1 mV < 30 mV); se omite del ajuste.
@@ -392,7 +443,8 @@ conversiones. Lo que se toca:
 | `FSR_TO_VCC` | `True` | si inviertes el divisor |
 | `ADC_TRUST_V` | `2.45` | techo fiable del ADC |
 | `ADC_MAX_V` | `3.10` | techo físico |
-| `ADC_MIN_V` | `0.03` | por debajo se considera sin carga |
+| `ADC_MIN_V` | `0.03` | umbral histórico de "sin carga" (para diagnóstico) |
+| `ADC_FLOOR_V` | `0.142` | piso real medido: por debajo el ADC no distingue |
 | `BAUDRATE` | `115200` | debe coincidir con el firmware |
 
 También define `CHANNELS = ("S3", "S4")`, el orden exacto del firmware.
@@ -443,35 +495,36 @@ Decide la resistencia con el resultado del `--range-check` (ver
 ### 10.2 Calibrar un sensor (uno por sesión)
 
 ```powershell
-python pc\capture.py --port COM4 --session fsr5kg_S3 `
-    --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,5000 `
-    --reps 2 --hold 2.0 --vcc 3.27 --r-fixed 1633,1641
+python pc\capture.py --port COM4 --session fsr5kg_S3 --channel 0 `
+    --sweep 0,250,500,750,1000,1500,2000,2500,3000,3500,4000,4500 `
+    --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
+    --vcc 3.27 --r-fixed 1633,1641
 python pc\fit.py --csv data\raw\fsr5kg_S3.csv --only S3
 python pc\live.py --port COM4 --models data\models
 ```
 
-Repite con `--session fsr5kg_S4` y `fit.py ... --only S4` para el otro sensor.
-El CSV guarda las dos filas por peso; `fit.py` omite el canal que no cargaste.
+Al terminar cada intervalo sueltas el dedo y escribes el peso observado; mínimo
+y máximo son opcionales. Repite con `--session fsr5kg_S4 --channel 1` y
+`fit.py ... --only S4` para el otro sensor.
 
 Valida con un peso conocido, no con los mismos puntos del ajuste.
 
-### 10.3 Dos sensores a la vez (misma carga)
+### 10.3 Dos sensores en la misma campaña
 
-Si ambos FSR reciben la misma carga, no uses `--only`: se ajustan los dos en la
-misma sesión.
-
-```powershell
-python pc\capture.py --port COM4 --session mixto --r-fixed 1633,1641 ...
-```
-
-El CSV guarda `r_fixed=1633/1641`. Después:
+No mezcles los dos sensores en una sola sesión. Aunque compartan carga, cada
+FSR tiene su propia curva y su propio montaje: usa una sesión por sensor.
 
 ```powershell
-python pc\fit.py --csv data\raw\mixto.csv          # lo lee del CSV
-python pc\fit.py --csv data\raw\mixto.csv --r-fixed 1633,1641   # o lo fuerzas
+python pc\capture.py --port COM4 --session campana_S3 --channel 0 ...
+python pc\capture.py --port COM4 --session campana_S4 --channel 1 ...
 ```
 
-`fit.py` convierte cada fila con la resistencia de su canal.
+El CSV de cada sesión guarda `canal=0` o `canal=1` y su `r_fixed` por canal. Si
+intentas reutilizar una sesión con otro canal, el script se niega para no
+mezclar curvas.
+
+`fit.py` sigue leyendo `r_fixed=1633/1641` y convierte cada fila con la
+resistencia de su canal.
 
 ### 10.4 Recalibrar tras cambiar `R_fija`
 
@@ -569,10 +622,11 @@ Windows); los documentos sí usan UTF-8.
 **`capture.py`**
 
 ```
+--channel 0            sensor de la sesión (0=S3, 1=S4)
 --port COM4            puerto
 --baud 115200          baudrate
 --session NOMBRE       nombre del CSV
---hold 3.0             s promediados por punto
+--hold 3.0             duración del intervalo de captura (s)
 --vcc 3.27             tensión del riel
 --r-fixed 1633,1641    o un único valor
 --topology fsr_to_vcc
@@ -637,9 +691,12 @@ Windows); los documentos sí usan UTF-8.
 | `PUERTO OCUPADO` | Monitor Serie del IDE abierto | ciérralo; solo un programa usa el COM |
 | `No existe COM4 o esta desconectado.` | cable o número de puerto | revisa Administrador de dispositivos |
 | `No llegan muestras validas del ESP32.` | preflight de `capture.py` | ejecuta `probe.py --raw` |
-| `muy pocas muestras en la ventana` | `--hold` muy corto o enlace caído | sube `--hold` o revisa el cable |
+| `Muy pocas muestras NUEVAS` | `--hold` muy corto o enlace caído | sube `--hold` o revisa el cable |
+| `Frecuencia efectiva muy baja` | llegan muestras con huecos (< 10 Hz) | revisa el enlace y el Monitor Serie |
+| `Faltaron datos durante el intervalo` | se perdió parte de la ventana | repite la captura |
+| `CSV de otra version` | sesión creada con una versión anterior | usa otra `--session` |
 | `--r-fixed tiene N valores pero hay 2 canales` | lista mal formada | pasa 1 o 2 valores: `1637` o `1633,1641` |
-| `ya existe con r_fixed=... y ahora usas ...` | sesión reutilizada con otro hardware | usa otra `--session` |
+| `ya existe con canal=... y ahora usas ...` | sesión reutilizada con otro sensor | usa otra `--session` |
 | `el CSV no tiene datos` | captura interrumpida antes de guardar | repite la captura |
 | `solo N punto(s) util(es); necesito al menos 2` | demasiados puntos a 0 g | añade puntos con peso |
 | `no encontre modelos en data\models` | aún no ejecutaste `fit.py` | ajusta primero |

@@ -29,4 +29,5 @@ desktop.ini
 
 # Guias privadas / datos del equipo (no publicar)
 GUIA_PRIVADA_CALIBRACION.md
+GUIA_PRIVADA_ENTORNO.md
 *.private.md

@@ -49,6 +49,7 @@ BAUDRATE = 115200
 ADC_TRUST_V = 2.45
 ADC_MAX_V = 3.10
 ADC_MIN_V = 0.03             # por debajo, R_fsr es practicamente infinito
+ADC_FLOOR_V = 0.142          # piso real medido: por debajo no se distingue
 
 
 def topology_name(fsr_to_vcc: bool = FSR_TO_VCC) -> str:
