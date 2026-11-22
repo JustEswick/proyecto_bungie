@@ -612,7 +612,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="voltaje real del riel 3V3 (mideal con multimetro)")
     p.add_argument("--r-fixed", default=str(fsr.R_FIXED_OHMS),
                    help="resistencia fija en ohmios; acepta un valor por canal: "
-                        "1633,1641")
+                        "1667,1710")
     p.add_argument("--topology", choices=["fsr_to_vcc", "fsr_to_gnd"],
                    default=fsr.topology_name(), help="orientacion del divisor")
     p.add_argument("--simulate", action="store_true",

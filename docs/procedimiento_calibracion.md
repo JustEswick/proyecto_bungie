@@ -36,11 +36,10 @@ campaña de medidas.
 
 - ESP32 DevKit con el firmware `fsr_stream`.
 - 2 × FSR402.
-- Por cada sensor, una resistencia fija de **~1,63 kΩ**. La forma barata de
+- Por cada sensor, una resistencia fija de **~1,67 kΩ**. La forma barata de
   conseguirla es **10 kΩ en paralelo con 2 kΩ** (`10k ∥ 2k = 1666,7 Ω`
-  nominales). En este montaje se midieron **1633 Ω (S3)** y **1641 Ω (S4)**.
-  Mide la combinación con el multímetro si quieres precisión; dos resistencias
-  del 5 % en paralelo suelen quedar dentro del 1–2 %.
+  nominales). Mide la combinación con el multímetro si quieres precisión; dos
+  resistencias del 5 % en paralelo suelen quedar dentro del 1–2 %.
 - Báscula de cocina de 5 kg (resolución 1 g).
 - **Disco rígido** de ~12–13 mm de diámetro: arandela gruesa, ficha de dominó
   recortada, taco de madera, pieza impresa en 3D. Debe ser plano y no
@@ -102,30 +101,30 @@ por debajo de 150 mV la resolución efectiva se degrada y por encima de
 en ~3,1 V, donde el ADC recorta.
 
 Por eso el objetivo del divisor es que **5 kg caigan por debajo de 2,45 V**.
-Con `VCC = 3,27 V`:
+Con `VCC = 3,30 V`:
 
 ```
-V_nodo = 3,27 · R_fija / (R_fija + R_fsr)
+V_nodo = 3,30 · R_fija / (R_fija + R_fsr)
 ```
 
-### 3.2 Por qué ~1,63 kΩ y no 10 kΩ
+### 3.2 Por qué ~1,67 kΩ y no 10 kΩ
 
 Con la `10 kΩ` original, un FSR402 típico llega a 2,45 V con solo ~750–1000 g:
-todo lo que pase de ahí se mide mal. Con `10k ∥ 2k ≈ 1,63 kΩ` el mismo sensor
+todo lo que pase de ahí se mide mal. Con `10k ∥ 2k ≈ 1,67 kΩ` el mismo sensor
 reparte mejor el rango:
 
-| Carga (g) | R_fsr típica | V_nodo con 1,63 kΩ | ¿Zona fiable? |
+| Carga (g) | R_fsr típica | V_nodo con 1,67 kΩ | ¿Zona fiable? |
 |---:|---:|---:|:--|
 | 0 | abierto | 0,00 V | sí |
-| 100 | ~38 kΩ | 0,13 V | sí (justo en el límite bajo) |
-| 300 | ~11 kΩ | 0,42 V | sí |
-| 500 | ~6,4 kΩ | 0,67 V | sí |
-| 750 | ~4,1 kΩ | 0,93 V | sí |
-| 1000 | ~3,0 kΩ | 1,15 V | sí |
-| 2000 | ~1,4 kΩ | 1,76 V | sí |
-| 3000 | ~0,9 kΩ | 2,11 V | sí |
-| 4000 | ~0,65 kΩ | 2,34 V | sí |
-| **5000** | **~0,51 kΩ** | **2,49 V** | **al límite** |
+| 100 | ~38 kΩ | 0,14 V | sí (justo en el límite bajo) |
+| 300 | ~11 kΩ | 0,43 V | sí |
+| 500 | ~6,4 kΩ | 0,68 V | sí |
+| 750 | ~4,1 kΩ | 0,95 V | sí |
+| 1000 | ~3,0 kΩ | 1,18 V | sí |
+| 2000 | ~1,4 kΩ | 1,79 V | sí |
+| 3000 | ~0,9 kΩ | 2,14 V | sí |
+| 4000 | ~0,65 kΩ | 2,37 V | sí |
+| **5000** | **~0,51 kΩ** | **2,53 V** | **al límite** |
 
 Los valores de `R_fsr` son orientativos (ley aproximada
 `R ≈ 3000 · (g/1000)^(-1,1)`); **tu unidad variará**. Lo que importa es la
@@ -186,7 +185,7 @@ Si tu `--range-check` sale por encima de 2,45 V, pasa a 1 kΩ.
 
 ### 5.1 Puntos
 
-Para un rango de 0–5 kg con `R_fija = 1,63 kΩ`, la lista recomendada es:
+Para un rango de 0–5 kg con `R_fija = 1,67 kΩ`, la lista recomendada es:
 
 ```
 0, 250, 500, 750, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500 g
@@ -194,9 +193,10 @@ Para un rango de 0–5 kg con `R_fija = 1,63 kΩ`, la lista recomendada es:
 
 Los primeros 100 g caen muy abajo (~140 mV), así que no añadas puntos por
 debajo salvo que te interese esa zona. **No se calibra a 5000 g**: la báscula se
-reinicia justo a 5 kg. Se mide hasta 4500 g, que es una referencia estable, y el
-modelo extrapola el último 10 %. Eso se declara como limitación; no se inventa
-el punto de 5 kg.
+reinicia justo a 5 kg. Se mide hasta 4500 g como referencia, pero el modelo se
+**cierra en 4000 g** (`--max-g 4000`) si el punto de 4500 se sale de la
+tendencia: así la tabla no extrapola y satura en el último nodo fiable. Declara
+ese límite; no se inventa el punto de 5 kg.
 
 - **0 g** se captura en reposo (sin tocar). No entra en el ajuste logarítmico,
   pero es tu referencia de offset y sirve para verificar que no hay señal
@@ -226,7 +226,7 @@ el punto de 5 kg.
     --channel 0 `
     --sweep 0,250,500,750,1000,1500,2000,2500,3000,3500,4000,4500 `
     --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
-    --vcc 3.27 --r-fixed 1633,1641
+    --vcc 3.30 --r-fixed 1667,1710
 ```
 
 Cada sesión calibra **un solo sensor** (`--channel 0` = S3, `--channel 1` = S4).
@@ -278,7 +278,7 @@ El CSV (`data/raw/<sesion>.csv`) guarda por punto:
 Las cabeceras `# vcc=`, `# r_fixed=`, `# topologia=` y `# canal=` quedan
 grabadas en el propio archivo: el ajuste usa esos valores, no los de por
 defecto. Así un CSV antiguo sigue siendo reproducible. `r_fixed` puede ser un
-valor por canal (`1633/1641`): cada fila se convierte con el de su sensor.
+valor por canal (`1667/1710`): cada fila se convierte con el de su sensor.
 
 Cada sesión nueva calibra **un solo sensor** y guarda **una fila por punto**.
 Si abres un CSV antiguo con los dos canales, `fit.py` detecta el que está en
@@ -332,13 +332,19 @@ Criterios de aceptación sugeridos:
 
 | Nombre | Forma | Ventajas | Límites |
 |---|---|---|---|
-| M1 ley potencial | `g = A·R^B` | 2 parámetros, va al firmware, extrapola con sentido físico | Rígido si la curva tiene codo |
+| M1 ley potencial | `g = A·R^B` | 2 parámetros, extrapola con sentido físico | Rígido si la curva tiene codo |
 | M2 cuadrática log | `log g = c0 + c1·logR + c2·logR²` | Absorbe curvatura | 3 parámetros, puede explotar fuera de rango |
-| M3 interpolación | PCHIP monótona | La más exacta dentro de lo medido | No extrapola; necesita tabla en el firmware |
+| M3 tabla log–log | interpolación lineal de `(logR, logg)` | La más exacta dentro de lo medido; es la que va al firmware | No extrapola: satura en los extremos |
 
-Recomendación: usa **M3** para validar que la toma de datos es buena (si M3
-tampoco ajusta, el problema es experimental), y **M1** para producción si su
-LOOCV está dentro del criterio. `fit.py` ya genera `calibration.h` con M1.
+Recomendación: usa **M3** para validar que la toma de datos es buena y como
+modelo de producción. `fit.py` guarda la tabla `(logR, logg)` en el campo
+`embedded` del JSON y genera `calibration.h` con ella; el ESP32 interpola
+linealmente igual que `pc/model.py`, así que no hay divergencia PC/firmware.
+M1/M2 siguen sirviendo para ver tendencias y para citar una ecuación compacta,
+pero en este montaje no bajan del criterio del 3 %.
+
+**Rango declarado del modelo final: 250–4000 g por sensor.** Por debajo de
+250 g no hay nodos y la tabla reporta `0 g`; no se extrapola hacia abajo.
 
 ---
 
@@ -381,7 +387,7 @@ Resumen de extremo a extremo, con los comandos en orden:
     --channel 0 `
     --sweep 0,250,500,750,1000,1500,2000,2500,3000,3500,4000,4500 `
     --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
-    --vcc 3.27 --r-fixed 1633,1641
+    --vcc 3.30 --r-fixed 1667,1710
 
 # 6. Repetir para S4 con --session fsr5kg_S4 --channel 1
 
@@ -396,27 +402,31 @@ Si un sensor lleva una resistencia distinta (por ejemplo, solo tienes una 2 kΩ
 y el otro sigue con 10 kΩ), pasa los dos valores:
 
 ```powershell
---r-fixed 1633,1641
+--r-fixed 1667,1710
 ```
 
-El CSV guarda ese `1633/1641`, y `fit.py` lo recupera solo: no tienes que
+El CSV guarda ese `1667/1710`, y `fit.py` lo recupera solo: no tienes que
 repetir la opción al ajustar.
 
 ---
 
 ## 11. Siguiente paso en tu proyecto
 
-Con `data/models/*.json` ya tienes `A` y `B` por sensor. Dos caminos:
+Con `data/models/*.json` ya tienes la tabla calibrada por sensor. Dos caminos:
 
 - **En el PC** (lo que hace `live.py`): lees el puerto, conviertes y decides.
-- **En el ESP32**: incluye `firmware/fsr_stream/calibration.h` y añade
+- **En el ESP32**: genera `firmware/fsr_stream/calibration.h` con `fit.py`
+  (es local, no se versiona) y añade
 
   ```cpp
-  float ohms = CAL_R_FIXED_OHMS[i] * (CAL_VCC_VOLTS - v) / v;
-  float gramos = CAL_A[i] * powf(ohms, CAL_B[i]);
+  // mv en milivoltios; devuelve NAN si el canal no está calibrado
+  float gramos = cal_grams(i, mv);
   ```
 
-  Ten en cuenta que `powf` y el logaritmo cuestan, pero a 25 Hz sobra de todo.
+  El firmware ya lo hace desde la versión 1.1 y añade `g0,g1` al final de cada
+  línea CSV. `cal_grams()` convierte mV → ohmios con la `R_fija` del canal,
+  interpola la tabla en log–log y satura fuera del rango medido. `powf` y
+  `log10f` cuestan poco a 25 Hz.
 
 Si el proyecto final necesita pesar de verdad (no solo detectar), el sustituto
 correcto es una célula de carga + HX711: resolución de gramos, linealidad real

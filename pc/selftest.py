@@ -94,7 +94,7 @@ def test_simulator() -> None:
     check("ruido bajo", all(s < 10 for s in sd),
           f"{sd[0]:.2f} / {sd[1]:.2f} mV")
 
-    # Con R_fija = 1637 ohm, 5 kg debe quedar en la parte alta pero sin recortar
+    # Con R_fija ≈ 1.67 kΩ, 5 kg debe quedar en la parte alta pero sin recortar
     # (el techo fiable es 2.45 V; 5 kg puede quedar justo por encima en algunas
     # unidades, de ahi el margen hasta 2.9 V).
     src = SimulatedSource(n_ch=2).start()
@@ -133,8 +133,8 @@ def test_fit_recovers_law() -> None:
 def _write_capture(path: Path, rows: list[str]) -> None:
     header = [
         "# calibracion FSR - puntos de referencia",
-        "# vcc=3.27",
-        "# r_fixed=1633/1641",
+        "# vcc=3.30",
+        "# r_fixed=1667/1710",
         "# topologia=fsr_to_vcc",
         "# canales=S3,S4",
         "# creado=2026-11-12T18:00:00",
@@ -267,12 +267,12 @@ def test_capture_hybrid() -> None:
               buf.getvalue().strip())
 
         v1 = tmp / "v1.csv"
-        v1.write_text("# vcc=3.27\n# r_fixed=1637\n"
+        v1.write_text("# vcc=3.30\n# r_fixed=1667\n"
                       "# topologia=fsr_to_vcc\n# canales=S3,S4\n"
                       "timestamp,session,ch,nombre,gramos,mv_mean,mv_std,"
                       "raw_mean,raw_std,n\n", encoding="utf-8")
         try:
-            capture._init_file(v1, {"vcc": "3.27", "r_fixed": "1637",
+            capture._init_file(v1, {"vcc": "3.30", "r_fixed": "1667",
                                     "topologia": "fsr_to_vcc", "canal": "",
                                     "canales": "S3,S4"})
             rejected = False

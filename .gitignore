@@ -9,6 +9,7 @@ __pycache__/
 
 # Firmware
 firmware/**/build/
+firmware/fsr_stream/calibration.h
 *.bin
 *.elf
 *.map
@@ -17,6 +18,10 @@ firmware/**/build/
 data/raw/*.csv
 data/models/*.json
 data/models/*.png
+data/models/anteriores/
+
+# Backups locales (no versionar)
+*.bak
 
 # Editores
 .vscode/

@@ -66,7 +66,7 @@ def add_resistance(df: pd.DataFrame, vcc: float, r_fixed,
                    fsr_to_vcc: bool) -> pd.DataFrame:
     """Convierte mV -> ohmios usando la R_fija de CADA canal.
 
-    ``r_fixed`` puede ser un numero o una lista (p. ej. 1633 para S3 y 1641
+    ``r_fixed`` puede ser un numero o una lista (p. ej. 1667 para S3 y 1710
     para S4). El CSV trae la columna ``ch`` y de ahi se elige el valor.
     """
     df = df.copy()
@@ -315,23 +315,90 @@ def plot_channel(agg: pd.DataFrame, fits: list[dict], best: dict,
 # calibration.h para el firmware
 # ---------------------------------------------------------------------------
 
+CAL_GRAMS_FN = r"""/* Gramos a partir de la tension del nodo, en milivoltios.
+   Devuelve 0 por debajo del nodo de menos peso y satura en el de mas.
+   Sin modelo (CAL_NODES[ch] < 2) devuelve NAN. */
+static inline float cal_grams(uint8_t ch, float mv) {
+  if (ch >= CAL_N_CH) return NAN;
+  const uint8_t n = CAL_NODES[ch];
+  if (n < 2) return NAN;
+  const float* lr = CAL_LOG_R[ch];
+  const float* lg = CAL_LOG_G[ch];
+
+  const float v = mv / 1000.0f;
+  if (!(v > 0.0f) || v >= CAL_VCC_VOLTS) return NAN;
+  float ohms;
+  if (CAL_FSR_TO_VCC) {
+    ohms = CAL_R_FIXED_OHMS[ch] * (CAL_VCC_VOLTS - v) / v;
+  } else {
+    ohms = CAL_R_FIXED_OHMS[ch] * v / (CAL_VCC_VOLTS - v);
+  }
+  if (!(ohms > 0.0f)) return NAN;
+
+  const float x = log10f(ohms);
+  if (x <= lr[0])     return powf(10.0f, lg[0]);   /* saturado arriba */
+  if (x >= lr[n - 1]) return 0.0f;                 /* sin carga */
+
+  uint8_t lo = 0, hi = (uint8_t)(n - 1);
+  while ((uint8_t)(hi - lo) > 1) {
+    const uint8_t mid = (uint8_t)((lo + hi) >> 1);
+    if (lr[mid] <= x) lo = mid; else hi = mid;
+  }
+  const float t = (x - lr[lo]) / (lr[hi] - lr[lo]);
+  return powf(10.0f, lg[lo] + t * (lg[hi] - lg[lo]));
+}"""
+
+
 def write_calibration_header(models: list[dict], path: Path,
                              vcc: float, r_fixed, fsr_to_vcc: bool) -> None:
+    """Genera calibration.h con una tabla log-log por canal.
+
+    El firmware interpola linealmente entre nodos, igual que pc/model.py,
+    asi que la prediccion del PC y la del ESP32 coinciden.
+    """
     by_ch = {int(m.get("ch", i)): m for i, m in enumerate(models)}
     max_ch = max(by_ch) if by_ch else 0
     n_ch = max(len(fsr.CHANNELS), max_ch + 1)
-    r_vals = [fsr.r_fixed_for(i, r_fixed) for i in range(n_ch)]
+
+    r_vals: list[float] = []
+    tables: dict[int, tuple[list[float], list[float]]] = {}
+    ranges: dict[int, list[float]] = {}
+    metrics: dict[int, dict] = {}
+    loo_vals: dict[int, float] = {}
+    for i in range(n_ch):
+        m = by_ch.get(i)
+        hw = (m or {}).get("hardware", {})
+        r_vals.append(float(hw.get("r_fixed", fsr.r_fixed_for(i, r_fixed))))
+
+        emb = (m or {}).get("embedded")
+        if emb and emb.get("model") == "interp" and emb.get("params"):
+            lr = [float(v) for v in emb["params"]["log_r"]]
+            lg = [float(v) for v in emb["params"]["log_g"]]
+            order = sorted(range(len(lr)), key=lambda k: lr[k])
+            tables[i] = ([lr[k] for k in order], [lg[k] for k in order])
+            loo_vals[i] = float(emb.get("loocv_rmse_g", float("nan")))
+        else:
+            tables[i] = ([], [])
+            loo_vals[i] = float("nan")
+        if m:
+            if m.get("range_g"):
+                ranges[i] = [float(v) for v in m["range_g"]]
+            metrics[i] = m.get("metrics", {})
+
     lines = [
         "/* Generado automaticamente por pc/fit.py. NO EDITAR A MANO. */",
         f"/* Fecha: {_dt.datetime.now().isoformat(timespec='seconds')} */",
         "/*",
-        "   Uso en el firmware:",
+        "   Modelo embebido: tabla de interpolacion LINEAL en log10.",
         "     ohms   = CAL_R_FIXED_OHMS[i] * (CAL_VCC - v) / v   (fsr_to_vcc)",
-        "     gramos = CAL_A[i] * powf(ohms, CAL_B[i]);",
-        "   Cada canal puede usar una resistencia fija distinta.",
+        "     lg     = interp(log10(ohms)) sobre CAL_LOG_R[i] -> CAL_LOG_G[i]",
+        "     gramos = powf(10, lg)",
+        "   Fuera del rango medido satura al nodo extremo (0 g por debajo,",
+        "   peso maximo por encima). El PC usa exactamente la misma tabla.",
         "*/",
         "#pragma once",
-        "#include <cmath>   // nanf() para canales sin modelo",
+        "#include <math.h>",
+        "#include <stdint.h>",
         "",
         f"#define CAL_N_CH {n_ch}",
         "static const float CAL_R_FIXED_OHMS[CAL_N_CH] = { "
@@ -339,39 +406,39 @@ def write_calibration_header(models: list[dict], path: Path,
         f"static const float CAL_VCC_VOLTS    = {vcc:.3f}f;",
         f"static const bool  CAL_FSR_TO_VCC   = {'true' if fsr_to_vcc else 'false'};",
         "",
+        "/* Nodos por canal (0 = canal sin calibrar). */",
+        "static const uint8_t CAL_NODES[CAL_N_CH] = { "
+        + ", ".join(str(len(tables[i][0])) for i in range(n_ch)) + " };",
+        "",
     ]
-    a_vals, b_vals, ok, missing = [], [], True, []
+
     for i in range(n_ch):
-        m = by_ch.get(i)
-        emb = None
-        if m:
-            emb = m.get("embedded") or (
-                m if m.get("model") == "power_law" else None)
-        if not emb or not emb.get("params"):
-            ok = False
-            missing.append(i)
-            a_vals.append(float("nan"))
-            b_vals.append(float("nan"))
+        lr, lg = tables[i]
+        name = (by_ch.get(i) or {}).get("nombre", f"ch{i}")
+        met = metrics.get(i, {})
+        if lr:
+            rng = ranges.get(i) or [0.0, 0.0]
+            loo = loo_vals.get(i, float("nan"))
+            loo_s = f"{loo:.1f} g" if math.isfinite(loo) else "n/d"
+            lines.append(f"/* {name}: {rng[0]:g}..{rng[1]:g} g, LOOCV {loo_s} */")
+            lines.append(f"static const float CAL_LOG_R_{i}[] = {{ "
+                         + ", ".join(f"{v:.6f}f" for v in lr) + " };")
+            lines.append(f"static const float CAL_LOG_G_{i}[] = {{ "
+                         + ", ".join(f"{v:.6f}f" for v in lg) + " };")
         else:
-            a_vals.append(emb["params"]["A"])
-            b_vals.append(emb["params"]["B"])
+            lines.append(f"/* {name}: SIN MODELO */")
+            lines.append(f"static const float CAL_LOG_R_{i}[] = {{ 0.0f }};")
+            lines.append(f"static const float CAL_LOG_G_{i}[] = {{ 0.0f }};")
+        lines.append("")
 
-    if not ok:
-        names = ", ".join(
-            fsr.CHANNELS[i] if i < len(fsr.CHANNELS) else f"ch{i}"
-            for i in missing)
-        lines.append("/* AVISO: algun canal no se pudo ajustar con la ley potencial;")
-        lines.append(f"   canales sin modelo: {names} (parametros nan).")
-        lines.append("   Reajusta con --model power_law o completa la captura. */")
-    else:
-        lines.append("/* Coeficientes de la LEY POTENCIAL (M1), que es el modelo")
-        lines.append("   embebible, aunque el mejor modelo del analisis sea otro. */")
-
-    lines.append("static const float CAL_A[] = { "
-                 + ", ".join(f"{v:.8g}f" for v in a_vals) + " };")
-    lines.append("static const float CAL_B[] = { "
-                 + ", ".join(f"{v:.8g}f" for v in b_vals) + " };")
+    lines.append("static const float* const CAL_LOG_R[CAL_N_CH] = { "
+                 + ", ".join(f"CAL_LOG_R_{i}" for i in range(n_ch)) + " };")
+    lines.append("static const float* const CAL_LOG_G[CAL_N_CH] = { "
+                 + ", ".join(f"CAL_LOG_G_{i}" for i in range(n_ch)) + " };")
     lines.append("")
+    lines.append(CAL_GRAMS_FN)
+    lines.append("")
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -384,18 +451,24 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Ajusta el modelo gramos <-> FSR y evalua su precision.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--csv", required=True, help="CSV generado por capture.py")
+    p.add_argument("--csv", action="append", required=True, metavar="CSV",
+                   help="CSV generado por capture.py. Repite --csv para juntar "
+                        "varios canales en la misma cabecera (p. ej. S3 y S4)")
     p.add_argument("--out-dir", default=str(fsr.DATA_MODELS))
     p.add_argument("--vcc", type=float, help="sobrescribe el VCC del CSV")
     p.add_argument("--r-fixed",
                    help="sobrescribe R_fixed del CSV; acepta un valor por canal: "
-                        "1633,1641")
+                        "1667,1710")
     p.add_argument("--topology", choices=["fsr_to_vcc", "fsr_to_gnd"],
                    help="sobrescribe la topologia del CSV")
     p.add_argument("--model", choices=["auto", "power_law", "quad_log", "interp"],
                    default="auto", help="forzar un modelo en vez de elegir el mejor")
     p.add_argument("--drop-saturated", action="store_true",
                    help="descartar puntos por encima del limite fiable del ADC")
+    p.add_argument("--min-g", type=float, metavar="G",
+                   help="ignorar puntos con peso menor que G gramos")
+    p.add_argument("--max-g", type=float, metavar="G",
+                   help="ignorar puntos con peso mayor que G gramos")
     p.add_argument("--only",
                    help="ajustar solo estos canales: S3, S4 o 0, 1 "
                         "(por defecto, todos los que tengan senal)")
@@ -405,15 +478,14 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
-    csv_path = Path(args.csv)
+def fit_capture(csv_path: Path, args, out_dir: Path):
+    """Ajusta un CSV y devuelve (modelos, vcc, topo, r_fixed)."""
     if not csv_path.exists():
         raise SystemExit(f"no existe {csv_path}")
 
     df, meta = load_capture(csv_path)
     if df.empty:
-        raise SystemExit("el CSV no tiene datos")
+        raise SystemExit(f"el CSV no tiene datos: {csv_path}")
 
     vcc = args.vcc if args.vcc is not None else float(meta.get("vcc", fsr.VCC_VOLTS))
     if "ch" in df.columns:
@@ -447,6 +519,23 @@ def main(argv=None) -> int:
 
     df = add_resistance(df, vcc, r_fixed, fsr_to_vcc)
 
+    # --- recorte opcional del rango de pesos -----------------------------
+    # No toca el CSV: solo limita que puntos entran en el ajuste.
+    n_before = len(df)
+    g_lo = 0.0 if args.min_g is None else float(args.min_g)
+    g_hi = float("inf") if args.max_g is None else float(args.max_g)
+    rango_msg = None
+    if args.min_g is not None or args.max_g is not None:
+        if g_hi <= g_lo:
+            raise SystemExit("ERROR: --max-g debe ser mayor que --min-g")
+        g = pd.to_numeric(df["gramos"], errors="coerce")
+        df = df[(g >= g_lo) & (g <= g_hi)]
+        hi_s = "max" if not math.isfinite(g_hi) else f"{g_hi:g}"
+        rango_msg = (f"  rango   : {g_lo:g}..{hi_s} g "
+                     f"({n_before - len(df)} fila(s) fuera)")
+        if df.empty:
+            raise SystemExit("ERROR: el rango pedido no deja ningun punto")
+
     print()
     print("=" * 74)
     print(f"  AJUSTE DE CALIBRACION  -  {csv_path.name}")
@@ -454,6 +543,8 @@ def main(argv=None) -> int:
     print(f"  divisor : R_fixed={fsr.format_r_fixed(r_fixed)} ohm  "
           f"VCC={vcc:.3f} V  ({topo})")
     print(f"  filas   : {len(df)}")
+    if rango_msg:
+        print(rango_msg)
     if only is not None:
         names = ", ".join(
             fsr.CHANNELS[i] if i < len(fsr.CHANNELS) else f"ch{i}"
@@ -481,7 +572,6 @@ def main(argv=None) -> int:
         print(f"  [!] {len(low)} fila(s) con senal casi nula y peso > 0: "
               f"contacto malo o divisor desconectado.")
 
-    out_dir = Path(args.out_dir)
     models_out: list[dict] = []
     min_mv = fsr.ADC_MIN_V * 1000.0
 
@@ -541,11 +631,14 @@ def main(argv=None) -> int:
             print("            construccion); su LOOCV es el dato informativo.")
         m1 = next((f for f in fits
                    if f["model"] == "power_law" and f.get("params")), None)
-        if m1 is not None:
-            loo1 = m1["loocv_rmse_g"]
-            loo1_s = f"{loo1:.1f} g" if math.isfinite(loo1) else "n/d"
-            print(f"  firmware: A={m1['params']['A']:.6g}  B={m1['params']['B']:.6g}"
-                  f"   (M1, LOOCV {loo1_s})")
+        interp_fit = next((f for f in fits
+                           if f["model"] == "interp" and f.get("params")), None)
+        if interp_fit is not None:
+            loo_t = interp_fit["loocv_rmse_g"]
+            loo_t_s = f"{loo_t:.1f} g" if math.isfinite(loo_t) else "n/d"
+            print(f"  firmware: tabla log-log de "
+                  f"{len(interp_fit['params']['log_r'])} nodos "
+                  f"(LOOCV {loo_t_s})")
         print()
 
         model = {
@@ -564,10 +657,10 @@ def main(argv=None) -> int:
             },
             "embedded": (
                 {
-                    "model": "power_law",
-                    "params": m1["params"],
-                    "loocv_rmse_g": m1["loocv_rmse_g"],
-                } if m1 is not None else None
+                    "model": "interp",
+                    "params": interp_fit["params"],
+                    "loocv_rmse_g": interp_fit["loocv_rmse_g"],
+                } if interp_fit is not None else None
             ),
             "n_points": int(len(fit_rows)),
             "range_g": [float(grams.min()), float(grams.max())],
@@ -587,12 +680,59 @@ def main(argv=None) -> int:
         print()
 
     if not models_out:
+        print("  [x] no se genero ningun modelo en este CSV.")
+    return models_out, vcc, topo, r_fixed
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    out_dir = Path(args.out_dir)
+
+    by_ch: dict[int, dict] = {}
+    vccs: set[float] = set()
+    topo_flags: set[bool] = set()
+    r_fixed_last = None
+
+    for raw in args.csv:
+        path = Path(raw)
+        models, vcc, topo, r_fixed = fit_capture(path, args, out_dir)
+        vccs.add(round(float(vcc), 4))
+        topo_flags.add(fsr.parse_topology(topo))
+        r_fixed_last = r_fixed
+        for m in models:
+            ch = int(m["ch"])
+            if ch in by_ch:
+                print(f"  [!] canal {ch} repetido; se queda el ajuste de "
+                      f"{path.name}.")
+            by_ch[ch] = m
+
+    if not by_ch:
         raise SystemExit("no se genero ningun modelo")
+    if len(topo_flags) > 1:
+        raise SystemExit("ERROR: topologias distintas entre CSVs.")
+
+    models_out = [by_ch[k] for k in sorted(by_ch)]
+
+    if len(vccs) > 1:
+        print(f"  [!] VCC distinto entre CSVs: {sorted(vccs)}; "
+              f"la cabecera usa {max(vccs):.3f} V.")
 
     if not args.no_header:
         hdr = fsr.FIRMWARE_DIR / "calibration.h"
-        write_calibration_header(models_out, hdr, vcc, r_fixed, fsr_to_vcc)
+        write_calibration_header(
+            models_out, hdr,
+            vcc=max(vccs) if vccs else fsr.VCC_VOLTS,
+            r_fixed=(r_fixed_last if r_fixed_last is not None
+                     else fsr.R_FIXED_OHMS),
+            fsr_to_vcc=next(iter(topo_flags)) if topo_flags else True)
         print(f"  cabecera firmware -> {hdr}")
+        for ch in sorted(by_ch):
+            m = by_ch[ch]
+            rng = m.get("range_g") or [0.0, 0.0]
+            emb = m.get("embedded") or {}
+            n = len((emb.get("params") or {}).get("log_r", []))
+            print(f"    {m.get('nombre', f'ch{ch}'):<4s} "
+                  f"{rng[0]:g}..{rng[1]:g} g  {n} nodos")
 
     print()
     print("  Criterio practico: para pesar en gramos con un FSR402, un RMSE")

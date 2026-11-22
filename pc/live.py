@@ -83,9 +83,19 @@ def main(argv=None) -> int:
                     parts.append(f"{name:>6}{m:11.1f}{fsr.format_ohms(ohms):>14}"
                                  f"{'--':>11}   (sin modelo)")
                     continue
-                grams = predict_grams_from_mv(model, m)
+                # Usa la misma tabla que va en el firmware (campo embedded)
+                # y satura igual: asi live.py predice lo que vera el ESP32.
+                emb = model.get("embedded")
+                if emb and emb.get("model") == "interp" and emb.get("params"):
+                    eval_model = dict(emb)
+                    eval_model["hardware"] = model.get("hardware", {})
+                    grams = predict_grams_from_mv(eval_model, m, saturate=True)
+                    label = "tabla"
+                else:
+                    grams = predict_grams_from_mv(model, m)
+                    label = model["model"]
                 parts.append(f"{name:>6}{m:11.1f}{fsr.format_ohms(ohms):>14}"
-                             f"{grams:11.1f}   {model['model']}")
+                             f"{grams:11.1f}   {label}")
             sys.stdout.write("\r" * 200 + " | ".join(parts))
             sys.stdout.flush()
     except KeyboardInterrupt:

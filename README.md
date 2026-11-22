@@ -7,16 +7,16 @@ reales.
 Pensado para el montaje:
 
 ```
-        3V3 ──[ FSR402 ]──┬──[ R 1,63 kΩ ]── GND
+        3V3 ──[ FSR402 ]──┬──[ R 1,67 kΩ ]── GND
                           │
                           ├── GPIO35   (S3)
                           └── GPIO34   (S4)
 ```
 
-`R 1,63 kΩ` se consigue con **10 kΩ en paralelo con 2 kΩ** (nominal). En este
-montaje se midieron **1633 Ω (S3)** y **1641 Ω (S4)**, con un valor medio de
-**1637 Ω**. Al presionar, la resistencia del FSR baja y la tensión del nodo sube:
-`R_fsr = 1637 · (VCC − V_nodo) / V_nodo`.
+`R 1,67 kΩ` se consigue con **10 kΩ en paralelo con 2 kΩ** (`10k ∥ 2k ≈
+1667 Ω` nominal). Mide tu combinación real y pásala con `--r-fixed`: el modelo
+usa ese valor. Al presionar, la resistencia del FSR baja y la tensión del nodo
+sube: `R_fsr = R_fija · (VCC − V_nodo) / V_nodo`.
 
 Ese valor es el que permite llegar a **5 kg** sin que el ADC del ESP32 entre en
 la zona no caracterizada (por encima de ~2,45 V).
@@ -104,13 +104,18 @@ Debe terminar con `Todo correcto: el entorno esta listo para calibrar.`
 5. Abre el *Serial Monitor* a **115200** baudios. Debes ver:
 
 ```
-# ch0=S3 ch1=S4 r_fixed=1637.00 vcc=3.27 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
-# ms,raw0,mv0,raw1,mv1
-12345,1534,1234.5,1480,1190.2
-12385,1536,1235.1,1479,1190.0
+# ch0=S3 ch1=S4 r_fixed=1667.00 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.1 modelo=tabla_loglog
+# ms,raw0,mv0,raw1,mv1,g0,g1
+12345,1534,1234.5,1480,1190.2,0.0,0.0
+12385,1536,1235.1,1479,1190.0,0.0,0.0
 ```
 
 > Si ves caracteres raros, el baudrate del monitor no es 115200.
+
+La versión 1.1 usa `calibration.h` si existe y añade `g0,g1` al final de cada
+línea. Ese archivo lo genera `fit.py`, es local y no se versiona: cada usuario
+tiene su propia tabla. Si aún no lo has generado, el sketch compila igual y
+emite solo `raw`/`mv`. Si un canal no tiene modelo, sus gramos salen como `nan`.
 
 ### Compilar desde consola (sin abrir el IDE)
 
@@ -127,15 +132,15 @@ Debe terminar con `Todo correcto: el entorno esta listo para calibrar.`
 | Constante | Qué es | Cuándo cambiarla |
 |---|---|---|
 | `VCC_VOLTS` | tensión real del pin 3V3 | **Mídela con multímetro**; si no, el modelo arrastra un error de escala |
-| `R_FIXED_OHMS` | resistencia fija real | Si mides 1710 Ω en vez de 1637 Ω |
+| `R_FIXED_OHMS` | resistencia fija real | Si mides 1710 Ω en vez de 1667 Ω |
 | `FSR_TO_VCC` | orientación del divisor | Solo si cambias el cableado |
 | `OVERSAMPLE` | lecturas por muestra | Subir si hay mucho ruido |
 | `REPORT_HZ` | líneas por segundo | 25 va sobrado |
 
-El firmware **no** calcula gramos a propósito: calibrar en el PC evita
-reflashear en cada prueba. Cuando tengas el modelo, `fit.py` genera
-`calibration.h` con los coeficientes por si quieres que el ESP32 entregue
-gramos.
+El modelo se elige en el PC para poder iterar sin reflashear. Cuando tengas la
+tabla, `fit.py` genera `calibration.h` (local, no versionado) y el firmware la
+usa para añadir `g0,g1` al final de cada línea. Mientras no exista la tabla, el
+ESP32 sigue emitiendo `raw` y `mv`.
 
 ---
 
@@ -203,7 +208,7 @@ guarda **un solo sensor** (`--channel 0` = S3, `--channel 1` = S4).
     --channel 0 `
     --sweep 0,250,500,750,1000,1500,2000,2500,3000,3500,4000,4500 `
     --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
-    --vcc 3.27 --r-fixed 1633,1641
+    --vcc 3.30 --r-fixed 1667,1710
 ```
 
 Espera a que la señal del **canal elegido** sea estable (desviación ≤ 3 mV
@@ -229,33 +234,37 @@ Todas las opciones de cada script están en
 Salida por consola (por cada sensor):
 
 ```
-  --- S3 (11 puntos, 50..4000 g) ---
+  --- S3 (N puntos, min..max g) ---
   modelo                RMSE(g)       R2   max|err|(g)  LOOCV(g)
-  M1 ley potencial         14.2  0.99873         31.0       17.9   <== elegido
-  M2 cuadratica log        11.8  0.99912         26.4       21.3
-  M3 interpolacion          9.9  0.99938         22.1        -- 
-  ecuacion: gramos = 3.2451e+07 * R^(-2.1873)
+  M1 ley potencial        <rmse>     <r2>       <max>      <loocv>   <== elegido
+  M2 cuadratica log       <rmse>     <r2>       <max>      <loocv>
+  M3 interpolacion        <rmse>     <r2>       <max>        --
+  ecuacion: gramos = A * R^B
 ```
 
 - **RMSE(g)** es el error típico en gramos sobre los puntos medidos.
 - **LOOCV** es el error esperado con un peso *no usado* para ajustar; es el
   número honesto. Se elige el modelo con menor LOOCV.
-- **M3** suele dar el mejor ajuste dentro del rango medido, pero no extrapola.
-- **M1** es el que se puede meter en el firmware (2 coeficientes).
+- **M3** (tabla log–log) es el que va al firmware: interpola los nodos medidos
+  y satura fuera de rango. Es la misma tabla que evalúa `pc/model.py`.
+- **Rango declarado en el ejemplo: 250–4000 g por sensor.** Por debajo de ese
+  mínimo se reporta `0 g` (saturación por diseño), no un valor extrapolado.
+  Ajusta `--min-g`/`--max-g` al rango que midas en tu montaje.
+- **M1** se guarda como ecuación compacta, pero en el ejemplo no baja del 3 %.
 
 Genera:
 
-- `data/models/<sesion>_<canal>.json` → modelo + hardware + métricas
+- `data/models/<sesion>_<canal>.json` → modelo + hardware + métricas + `embedded`
 - `data/models/<sesion>_<canal>.png` → log-log, residuales, mV vs gramos
-- `firmware/fsr_stream/calibration.h` → `CAL_A[]`, `CAL_B[]`
+- `firmware/fsr_stream/calibration.h` → tabla `(logR, logg)` por canal + `cal_grams()`
 
 Opciones útiles:
 
 ```powershell
 --drop-saturated     # descarta puntos por encima de 2.45 V y compara
---model power_law    # fuerza el modelo embebible
---vcc 3.27           # si mides otra tensión de riel
---r-fixed 1633,1641  # si los dos canales usan resistencias distintas
+--model power_law    # fuerza un modelo concreto (auto, quad_log, interp)
+--vcc 3.30           # si mides otra tensión de riel
+--r-fixed 1667,1710  # si los dos canales usan resistencias distintas
 --only S3            # ajusta solo un sensor (S3, S4 o 0,1)
 ```
 
@@ -316,14 +325,14 @@ una célula de carga + HX711.
 Con `3V3 → FSR → 10k → GND`, un FSR402 a ~1 kg ya está en ~2,5 V, el techo
 fiable del ADC del ESP32: con la 10 kΩ original **5 kg recorta** (~3,15 V).
 
-Por eso el montaje por defecto usa **~1637 Ω** (nominal **10 kΩ ∥ 2 kΩ**; en
-este montaje se midieron 1633 Ω y 1641 Ω):
+Por eso el ejemplo usa **~1,67 kΩ** (nominal **10 kΩ ∥ 2 kΩ ≈ 1667 Ω**).
+Mide tu combinación real y pásala con `--r-fixed`:
 
 | `R_fija` | V a 5 kg | Zona fiable hasta | V a 100 g |
 |---|---:|---:|---:|
 | 10 kΩ | 3,15 V ❌ | ~0,9 kg | 690 mV |
 | 2 kΩ | 2,67 V | ~3,8 kg | 170 mV |
-| **1,63 kΩ** | **2,50 V** | **~4,5 kg** | **140 mV** |
+| **1,67 kΩ** | **2,52 V** | **~4,5 kg** | **141 mV** |
 | 1 kΩ | 2,24 V ✅ | ~7 kg | 85 mV |
 
 La tabla usa un FSR402 típico; tu unidad variará. Decide con

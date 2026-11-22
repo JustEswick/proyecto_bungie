@@ -26,18 +26,14 @@ DATA_MODELS = ROOT / "data" / "models"
 FIRMWARE_DIR = ROOT / "firmware" / "fsr_stream"
 
 # ---------------------------------------------------------------- hardware
-# Valores medidos en este montaje (multimetro sobre el hardware real).
-# VCC se midio en 3.27 V en el pin 3V3 con el USB conectado.
+# Valores por defecto del montaje de ejemplo. No son medidas de un equipo
+# concreto: mide tu riel y tus resistencias y pasalos con --vcc / --r-fixed.
 #
-# R_FIXED es la resistencia fija efectiva del divisor, medida por canal:
-#   S3: 9.78k || 1.96k = 1633 ohm
-#   S4: 9.83k || 1.97k = 1641 ohm
-# El promedio (1637 ohm) se usa como valor por defecto; para maxima
-# precision pasa los valores por canal:  --r-fixed 1633,1641
-# Si cambias el montaje, vuelve a medir y actualiza estos valores (y el
-# sketch, solo informativo).
-R_FIXED_OHMS = 1637.0
-VCC_VOLTS = 3.27
+# R_FIXED es la resistencia fija efectiva del divisor. Puede ser un unico
+# valor o uno por canal (S3, S4):  --r-fixed 1667,1710
+# El valor de ejemplo (1667 ohm) es 10k || 2k nominal.
+R_FIXED_OHMS = 1667.0
+VCC_VOLTS = 3.30
 FSR_TO_VCC = True
 
 CHANNELS = ("S3", "S4")      # orden identico al firmware (GPIO35, GPIO34)
@@ -49,7 +45,7 @@ BAUDRATE = 115200
 ADC_TRUST_V = 2.45
 ADC_MAX_V = 3.10
 ADC_MIN_V = 0.03             # por debajo, R_fsr es practicamente infinito
-ADC_FLOOR_V = 0.142          # piso real medido: por debajo no se distingue
+ADC_FLOOR_V = 0.15           # piso tipico del ADC: por debajo no se distingue
 
 
 def topology_name(fsr_to_vcc: bool = FSR_TO_VCC) -> str:
@@ -69,7 +65,7 @@ def parse_r_fixed(value, n_ch: int | None = None) -> float | list[float]:
     """Acepta un valor unico o una lista separada por comas.
 
     Con una lista se asigna un valor por canal, en el mismo orden que el
-    firmware (S3, S4):  --r-fixed 1633,1641
+    firmware (S3, S4):  --r-fixed 1667,1710
 
     Puede venir de argparse (str), de un CSV (str) o ya como numero/lista.
     """
@@ -85,7 +81,7 @@ def parse_r_fixed(value, n_ch: int | None = None) -> float | list[float]:
         text = str(value).strip()
         if not text:
             return float(R_FIXED_OHMS)
-        # Acepta "1633,1641", "1633;1641" y "1633/1641" (formato del CSV).
+        # Acepta "1667,1710", "1667;1710" y "1667/1710" (formato del CSV).
         parts = [p for p in text.replace(";", ",").replace("/", ",").split(",")
                  if p.strip()]
         vals = []
@@ -114,7 +110,7 @@ def r_fixed_for(ch: int, r_fixed=None) -> float:
 
 
 def format_r_fixed(r_fixed) -> str:
-    """'1637' o '1633/1641' para cabeceras y mensajes."""
+    """'1667' o '1667/1710' para cabeceras y mensajes."""
     if isinstance(r_fixed, (list, tuple)):
         return "/".join(f"{float(v):.0f}" for v in r_fixed)
     return f"{float(r_fixed):.0f}"

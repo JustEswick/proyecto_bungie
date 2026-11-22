@@ -73,7 +73,9 @@ def classify_line(text: str, n_ch: int = 2) -> str:
         return "old"
 
     parts = [p.strip() for p in t.split(",")]
-    if len(parts) == 1 + 2 * n_ch:
+    # >= para aceptar columnas extra al final (gramos emitidos por el
+    # firmware desde la version 1.1); raw/mv mantienen su posicion.
+    if len(parts) >= 1 + 2 * n_ch:
         try:
             int(parts[0])
             for i in range(n_ch):

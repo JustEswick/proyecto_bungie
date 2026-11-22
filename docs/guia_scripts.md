@@ -23,8 +23,8 @@ Si no activas el entorno, sustituye `python` por `.\.venv\Scripts\python.exe`.
 ## 1. El pipeline de un vistazo
 
 ```
-firmware/fsr_stream.ino          ESP32: solo adquiere y envía CSV
-        │  ms,raw0,mv0,raw1,mv1  (25 Hz)
+firmware/fsr_stream.ino          ESP32: adquiere y envía CSV
+        │  ms,raw0,mv0,raw1,mv1[,g0,g1]  (25 Hz)
         ▼
 pc/probe.py                      ¿el enlace funciona? veredicto
         │
@@ -41,9 +41,10 @@ pc/capture.py  ──────────────►   data/raw/<sesion>
 pc/live.py  ◄──────────────────  modelo en gramos (validación en vivo)
 ```
 
-Regla mental: **el firmware no convierte a gramos**. Todo el cálculo vive en el
-PC para poder iterar sin reflashear. `calibration.h` solo se usa si más adelante
-quieres que el ESP32 entregue gramos.
+Regla mental: **el modelo se elige en el PC y luego se copia al firmware**.
+`fit.py` genera `calibration.h` con una tabla log–log por canal; el ESP32 la usa
+para añadir `g0,g1` al final de cada línea. Así puedes iterar el modelo (y las
+capturas) sin reflashear, y al final el ESP32 entrega gramos por sí solo.
 
 ---
 
@@ -125,7 +126,7 @@ python pc\probe.py                      # autodetecta el puerto
   Duracion : 4.0 s
   Lineas   : 103 total (101 validas, 0 formato antiguo, 2 cabeceras)
   Frecuencia: 25.2 muestras/s
-  Cabecera : # ch0=S3 ch1=S4 r_fixed=1637.00 vcc=3.27 ...
+  Cabecera : # ch0=S3 ch1=S4 r_fixed=1667.00 vcc=3.30 ...
   Muestra  : 12345,1534,1234.5,1480,1190.2
 
   VEREDICTO: OK - el firmware responde en el formato esperado
@@ -198,8 +199,8 @@ python pc\capture.py --simulate --session prueba --channel 0
 | `--baud` | `115200` | baudrate |
 | `--session` | `sesion_AAAAMMDD_HHMMSS` | nombre del CSV en `data/raw/` |
 | `--hold` | `3.0` | duración del intervalo de captura, en segundos (0,5–300) |
-| `--vcc` | `3.27` | tensión real del riel |
-| `--r-fixed` | `1637.0` | resistencia fija; admite `1633,1641` por canal |
+| `--vcc` | `3.30` | tensión real del riel |
+| `--r-fixed` | `1667.0` | resistencia fija; admite `1667,1710` por canal |
 | `--topology` | `fsr_to_vcc` | orientación del divisor |
 | `--simulate` | no | datos sintéticos, sin hardware |
 | `--sweep` | — | lista de pesos a recorrer |
@@ -253,7 +254,7 @@ elegir el peso simulado; sin número usa 1000 g.
 python pc\capture.py --port COM4 --session fsr5kg_S3 --channel 0 `
     --sweep 0,100,200,300,500,750,1000,1500,2000,3000,4000,4500 `
     --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
-    --vcc 3.27 --r-fixed 1633,1641
+    --vcc 3.30 --r-fixed 1667,1710
 ```
 
 Antes de cada punto muestra una cuenta atrás de `--pause` segundos (10 por
@@ -283,10 +284,10 @@ Muestra el pico de cada canal durante `--range-seconds` y recomienda
 
 ```
   canal  mV pico   R a esa carga   R_fija recomendada
-     S3   2530.4        514 ohm              1.18 kohm
+     S3   2300.0        700 ohm              1.61 kohm
           -> OK: por debajo de 2450 mV
-          -> para 5000 g en ~2.3 V usa R_fija ~= 1.18 kohm (maximo 1.48 kohm)
-          -> tu R_fija actual (1637 ohm) es adecuada
+          -> para 5000 g en ~2.3 V usa R_fija ~= 1.61 kohm (maximo 2.01 kohm)
+          -> tu R_fija actual (1667 ohm) es adecuada
 ```
 
 No crea CSV. Es el paso que decide si necesitas `1k` en vez de `1,67k`.
@@ -297,8 +298,8 @@ No crea CSV. Es el paso que decide si necesitas `1k` en vez de `1,67k`.
 
 ```
 # calibracion FSR - puntos de referencia
-# vcc=3.27
-# r_fixed=1633/1641
+# vcc=3.30
+# r_fixed=1667/1710
 # topologia=fsr_to_vcc
 # canal=0
 # canales=S3
@@ -347,23 +348,37 @@ modelos por sensor y los compara con validación cruzada (LOOCV).
 ```powershell
 python pc\fit.py --csv data\raw\fsr5kg.csv
 python pc\fit.py --csv data\raw\fsr5kg.csv --show
-python pc\fit.py --csv data\raw\fsr5kg.csv --vcc 3.27 --r-fixed 1633,1641
+python pc\fit.py --csv data\raw\fsr5kg.csv --vcc 3.30 --r-fixed 1667,1710
+
+# Un canal por CSV, una sola cabecera con los dos:
+python pc\fit.py --csv data\raw\ejemplo_S3.csv `
+                 --csv data\raw\ejemplo_S4.csv --max-g 4000
 ```
+
+Repite `--csv` para juntar varios canales en la misma `calibration.h`. Si un
+canal aparece en dos CSV, se queda el último y avisa.
 
 **Opciones:**
 
 | Opción | Defecto | Para qué |
 |---|---|---|
-| `--csv` | obligatorio | CSV de `capture.py` |
+| `--csv` | obligatorio | CSV de `capture.py`; **repetible**, uno por canal |
 | `--out-dir` | `data/models` | dónde guardar JSON/PNG |
 | `--vcc` | del CSV | sobrescribe la tensión |
-| `--r-fixed` | del CSV | sobrescribe la resistencia; admite `1633,1641` |
+| `--r-fixed` | del CSV | sobrescribe la resistencia; admite `1667,1710` |
 | `--topology` | del CSV | sobrescribe el divisor |
 | `--model` | `auto` | fuerza `power_law`, `quad_log` o `interp` |
 | `--drop-saturated` | no | descarta puntos > 2450 mV |
+| `--min-g` | 0 | ignora puntos con menos peso (recorta el ajuste) |
+| `--max-g` | sin límite | ignora puntos con más peso, p. ej. `--max-g 4000` |
 | `--only` | todos con señal | ajusta solo `S3`, `S4` o `0,1` |
 | `--show` | no | abre las gráficas |
 | `--no-header` | no | no genera `calibration.h` |
+
+El recorte por rango (`--min-g` / `--max-g`) es la forma correcta de excluir un
+punto dudoso: **no toca el CSV**, solo decide qué puntos entran en el ajuste.
+Ojo: el rango es global a todos los `--csv`; como el modelo se cierra donde la
+curva deja de ser fiable, se aplica a los dos canales a la vez.
 
 **Canales sin señal:** en sesiones nuevas ya se guarda un solo canal. Si abres
 un CSV antiguo que contiene los dos, `fit.py` detecta el que quedó en reposo
@@ -379,28 +394,30 @@ No genera un modelo basura para ese canal. Para forzar uno concreto:
 **Salida por canal:**
 
 ```
-  --- S3 (11 puntos, 100..5000 g) ---
+  --- S3 (N puntos, min..max g) ---
   modelo                RMSE(g)       R2   max|err|(g)  LOOCV(g)
-  M1 ley potencial         18.4  0.99873         41.0       22.1   <== elegido
-  M2 cuadratica log        15.2  0.99912         33.4       27.6
-  M3 interpolacion         11.9  0.99938         24.0        --
-  ecuacion: gramos = 3.2451e+07 * R^(-2.1873)
-  firmware: A=3.2451e+07  B=-2.1873   (M1, LOOCV 22.1 g)
-  modelo  -> data/models/fsr5kg_S3.json
-  grafica -> data/models/fsr5kg_S3.png
+  M1 ley potencial        <rmse>     <r2>       <max>      <loocv>
+  M2 cuadratica log       <rmse>     <r2>       <max>      <loocv>   <== elegido
+  M3 interpolacion        <rmse>     <r2>       <max>        --
+  ecuacion: log10(g) = c0 + c1*log10(R) + c2*log10(R)^2
+  firmware: tabla log-log de N nodos (LOOCV <loocv> g)
+  modelo  -> data/models/ejemplo_S3_S3.json
+  grafica -> data/models/ejemplo_S3_S3.png
 ```
 
 **Qué genera:**
 
 - `<sesion>_<canal>.json` → modelo elegido + hardware + métricas + `embedded`.
 - `<sesion>_<canal>.png` → log-log, residuales y mV vs gramos.
-- `firmware/fsr_stream/calibration.h` → `CAL_A[]`, `CAL_B[]` y
-  `CAL_R_FIXED_OHMS[]` por canal.
+- `firmware/fsr_stream/calibration.h` → una tabla `(log10 R, log10 g)` por
+  canal, `CAL_R_FIXED_OHMS[]` y la función `cal_grams()`. Es local y está en
+  `.gitignore`: no se sube al repositorio.
 
-**Cómo elegir el modelo:** `fit.py` usa el **menor LOOCV**. M1 es el único que
-cabe en el firmware; el campo `embedded` del JSON guarda siempre M1 aunque el
-mejor sea M2/M3. Si M1 tiene un LOOCV pésimo, no lo metas en el ESP32: usa el
-modelo en el PC.
+**Cómo elegir el modelo:** `fit.py` usa el **menor LOOCV** para el JSON y las
+gráficas. Para el firmware guarda siempre la **tabla de interpolación lineal en
+log–log** en `embedded`: es la misma que evalúa `pc/model.py`, así que PC y
+ESP32 coinciden (verificado a < 0,02 g). Si un canal no tiene tabla (menos de 3
+puntos), `cal_grams()` devuelve `NAN` para ese canal.
 
 ---
 
@@ -408,6 +425,10 @@ modelo en el PC.
 
 **Qué hace:** carga uno o varios JSON y muestra `mV`, `ohmios` y `gramos` en
 vivo. Sirve para validar con un peso conocido.
+
+Usa el campo `embedded` (la **tabla log–log**) y satura igual que el firmware:
+en reposo muestra `0 g`, no un valor extrapolado. La columna final indica
+`tabla` cuando usa la tabla, o el nombre del modelo si no hay tabla.
 
 **Uso:**
 
@@ -438,13 +459,13 @@ conversiones. Lo que se toca:
 
 | Constante | Defecto | Cuándo cambiarla |
 |---|---|---|
-| `R_FIXED_OHMS` | `1637.0` | si tu resistencia real difiere |
-| `VCC_VOLTS` | `3.27` | **mídela** con multímetro |
+| `R_FIXED_OHMS` | `1667.0` | si tu resistencia real difiere |
+| `VCC_VOLTS` | `3.30` | **mídela** con multímetro |
 | `FSR_TO_VCC` | `True` | si inviertes el divisor |
 | `ADC_TRUST_V` | `2.45` | techo fiable del ADC |
 | `ADC_MAX_V` | `3.10` | techo físico |
 | `ADC_MIN_V` | `0.03` | umbral histórico de "sin carga" (para diagnóstico) |
-| `ADC_FLOOR_V` | `0.142` | piso real medido: por debajo el ADC no distingue |
+| `ADC_FLOOR_V` | `0.15` | piso típico: por debajo el ADC no distingue |
 | `BAUDRATE` | `115200` | debe coincidir con el firmware |
 
 También define `CHANNELS = ("S3", "S4")`, el orden exacto del firmware.
@@ -457,21 +478,36 @@ Archivo `firmware/fsr_stream/fsr_stream.ino`.
 
 | Constante | Defecto | Para qué |
 |---|---|---|
-| `R_FIXED_OHMS` | `1637.0f` | informativo; la conversión real la hace el PC |
-| `VCC_VOLTS` | `3.27f` | informativo |
+| `R_FIXED_OHMS` | `1667.0f` | informativo; la calibración real está en `calibration.h` |
+| `VCC_VOLTS` | `3.30f` | informativo |
 | `FSR_TO_VCC` | `true` | orientación del divisor |
 | `OVERSAMPLE` | `32` | lecturas ADC por muestra; súbelo si hay ruido |
 | `REPORT_HZ` | `25` | líneas por segundo |
 | `EMA_ALPHA` | `0.30f` | suavizado de la tensión |
 | `HEADER_EVERY_S` | `30` | reimprime la cabecera cada 30 s |
+| `EMIT_GRAMS` | auto | añade `g0,g1` si existe `calibration.h`; `0` fuerza el CSV 1.0 |
+
+Incluye `calibration.h` si existe. Ese archivo lo genera `fit.py`, es local y no
+se versiona: contiene la `R_fija` y el `VCC` reales de cada canal. Los valores de
+arriba son solo la información que el firmware escribe en la cabecera.
 
 **Formato de línea:**
 
 ```
-# ch0=S3 ch1=S4 r_fixed=1637.00 vcc=3.27 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
-# ms,raw0,mv0,raw1,mv1
-12345,1534,1234.5,1480,1190.2
+# ch0=S3 ch1=S4 r_fixed=1667.00 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.1 modelo=tabla_loglog
+# ms,raw0,mv0,raw1,mv1,g0,g1
+12345,1534,1234.5,1480,1190.2,0.0,0.0
 ```
+
+Los gramos van **al final** para que los parsers antiguos sigan aceptando la
+línea (leen las primeras `1 + 2·N` columnas e ignoran el resto). Fuera del rango
+calibrado la función satura: `0` por debajo del nodo de menos peso y el peso
+máximo por encima. Un canal sin modelo imprime `nan`.
+
+**Rango útil del ejemplo: 250–4000 g por sensor.** Por debajo de 250 g la tabla
+no tiene nodos y se reporta `0 g` (no es un fallo ni un sensor roto: es
+saturación por diseño). Por encima de 4000 g se satura en el peso máximo.
+Ajusta `--min-g`/`--max-g` al rango que midas en tu montaje.
 
 Las líneas `#` son metadatos: el PC las ignora. Si ves basura en el Monitor
 Serie, el baudrate no es 115200.
@@ -498,7 +534,7 @@ Decide la resistencia con el resultado del `--range-check` (ver
 python pc\capture.py --port COM4 --session fsr5kg_S3 --channel 0 `
     --sweep 0,250,500,750,1000,1500,2000,2500,3000,3500,4000,4500 `
     --reps 2 --hold 3.0 --pause 10 --settle 1.5 `
-    --vcc 3.27 --r-fixed 1633,1641
+    --vcc 3.30 --r-fixed 1667,1710
 python pc\fit.py --csv data\raw\fsr5kg_S3.csv --only S3
 python pc\live.py --port COM4 --models data\models
 ```
@@ -523,8 +559,12 @@ El CSV de cada sesión guarda `canal=0` o `canal=1` y su `r_fixed` por canal. Si
 intentas reutilizar una sesión con otro canal, el script se niega para no
 mezclar curvas.
 
-`fit.py` sigue leyendo `r_fixed=1633/1641` y convierte cada fila con la
-resistencia de su canal.
+`fit.py` sigue leyendo `r_fixed=1667/1710` y convierte cada fila con la
+resistencia de su canal. Para generar **una sola** `calibration.h` con los dos:
+
+```powershell
+python pc\fit.py --csv data\raw\campana_S3.csv --csv data\raw\campana_S4.csv --max-g 4000
+```
 
 ### 10.4 Recalibrar tras cambiar `R_fija`
 
@@ -547,11 +587,14 @@ Copia o incluye `firmware/fsr_stream/calibration.h`:
 
 ```cpp
 #include "calibration.h"
-float ohms = CAL_R_FIXED_OHMS[i] * (CAL_VCC_VOLTS - v) / v;
-float gramos = CAL_A[i] * powf(ohms, CAL_B[i]);
+
+// mv = tension del nodo en milivoltios (la que ya emite el firmware)
+float gramos = cal_grams(i, mv);   // NAN si el canal no esta calibrado
 ```
 
-`CAL_R_FIXED_OHMS` es un array si los canales usan resistencias distintas.
+`cal_grams()` convierte mV → ohmios con la `R_fija` de **ese** canal `i`,
+interpola linealmente en log–log y devuelve gramos. Es exactamente el mismo
+cálculo que `pc/model.py`, así que no hay que recalibrar la lógica del PC.
 
 ---
 
@@ -567,39 +610,48 @@ muestras.
 
 ```json
 {
-  "session": "fsr5kg",
+  "session": "ejemplo_S3",
   "ch": 0,
   "nombre": "S3",
-  "model": "power_law",
-  "params": {"A": 3.2e7, "B": -2.19},
-  "hardware": {"vcc": 3.27, "r_fixed": 1633.0, "topologia": "fsr_to_vcc"},
-  "metrics": {"rmse_g": 18.4, "r2": 0.9987,
-              "max_abs_g": 41.0, "loocv_rmse_g": 22.1},
-  "embedded": {"model": "power_law", "params": {"A": 3.2e7, "B": -2.19},
-               "loocv_rmse_g": 22.1},
-  "n_points": 11,
-  "range_g": [100.0, 5000.0],
-  "range_ohms": [510.0, 38000.0],
-  "created": "2026-11-11T18:22:01"
+  "model": "quad_log",
+  "params": {"c2": 1.0, "c1": -8.0, "c0": 18.0},
+  "hardware": {"vcc": 3.30, "r_fixed": 1667.0, "topologia": "fsr_to_vcc"},
+  "metrics": {"rmse_g": 12.4, "r2": 0.9991,
+              "max_abs_g": 31.0, "loocv_rmse_g": 15.2},
+  "embedded": {"model": "interp",
+               "params": {"log_r": [2.90, 2.95, "..."],
+                          "log_g": [3.60, 3.54, "..."]},
+               "loocv_rmse_g": 15.2},
+  "n_points": 10,
+  "range_g": [250.0, 4000.0],
+  "range_ohms": [1500.0, 650.0],
+  "created": "2026-01-01T00:00:00"
 }
 ```
 
-- `model`/`params` → el mejor modelo.
-- `embedded` → M1, el único embebible. Puede ser `null` si M1 no se pudo ajustar.
+- `model`/`params` → el mejor modelo (JSON y gráficas).
+- `embedded` → **tabla log–log** que va al firmware. Puede ser `null` si no hay
+  puntos suficientes.
 - `hardware.r_fixed` es la resistencia de **ese** canal.
 
 ### 11.3 `calibration.h`
 
 ```cpp
 #pragma once
+#include <math.h>
+#include <stdint.h>
 
 #define CAL_N_CH 2
-static const float CAL_R_FIXED_OHMS[CAL_N_CH] = { 1633.0f, 1641.0f };
-static const float CAL_VCC_VOLTS    = 3.270f;
+static const float CAL_R_FIXED_OHMS[CAL_N_CH] = { 1667.0f, 1710.0f };
+static const float CAL_VCC_VOLTS    = 3.300f;
 static const bool  CAL_FSR_TO_VCC   = true;
 
-static const float CAL_A[] = { 3.2e+07f, 2.9e+07f };
-static const float CAL_B[] = { -2.19f, -2.11f };
+static const uint8_t CAL_NODES[CAL_N_CH] = { 10, 11 };
+static const float CAL_LOG_R_0[] = { 2.934371f, /* ... */ 3.714237f };
+static const float CAL_LOG_G_0[] = { 3.602060f, /* ... */ 2.403121f };
+/* ... un par de arrays por canal ... */
+
+static inline float cal_grams(uint8_t ch, float mv);
 ```
 
 ### 11.4 Convenciones
@@ -627,8 +679,8 @@ Windows); los documentos sí usan UTF-8.
 --baud 115200          baudrate
 --session NOMBRE       nombre del CSV
 --hold 3.0             duración del intervalo de captura (s)
---vcc 3.27             tensión del riel
---r-fixed 1633,1641    o un único valor
+--vcc 3.30             tensión del riel
+--r-fixed 1667,1710    o un único valor
 --topology fsr_to_vcc
 --simulate             sin hardware
 --sweep 0,500,1000     barrido
@@ -649,11 +701,13 @@ Windows); los documentos sí usan UTF-8.
 ```
 --csv ARCHIVO          obligatorio
 --out-dir data/models
---vcc 3.27
---r-fixed 1633,1641    o un único valor
+--vcc 3.30
+--r-fixed 1667,1710    o un único valor
 --topology fsr_to_vcc
 --model auto           power_law | quad_log | interp
 --drop-saturated
+--min-g 0
+--max-g 4000
 --only S3              S3 | S4 | 0,1
 --show
 --no-header
@@ -695,7 +749,7 @@ Windows); los documentos sí usan UTF-8.
 | `Frecuencia efectiva muy baja` | llegan muestras con huecos (< 10 Hz) | revisa el enlace y el Monitor Serie |
 | `Faltaron datos durante el intervalo` | se perdió parte de la ventana | repite la captura |
 | `CSV de otra version` | sesión creada con una versión anterior | usa otra `--session` |
-| `--r-fixed tiene N valores pero hay 2 canales` | lista mal formada | pasa 1 o 2 valores: `1637` o `1633,1641` |
+| `--r-fixed tiene N valores pero hay 2 canales` | lista mal formada | pasa 1 o 2 valores: `1667` o `1667,1710` |
 | `ya existe con canal=... y ahora usas ...` | sesión reutilizada con otro sensor | usa otra `--session` |
 | `el CSV no tiene datos` | captura interrumpida antes de guardar | repite la captura |
 | `solo N punto(s) util(es); necesito al menos 2` | demasiados puntos a 0 g | añade puntos con peso |

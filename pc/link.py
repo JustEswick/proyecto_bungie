@@ -4,7 +4,8 @@ Ambas exponen la misma interfaz, asi que ``capture.py`` y ``live.py`` no
 saben (ni les importa) si los datos vienen del ESP32 o del simulador.
 
 Formato esperado de cada linea del firmware:
-    ms,raw0,mv0,raw1,mv1
+    ms,raw0,mv0,raw1,mv1[,g0,g1]
+Las columnas g* (firmware 1.1+) son opcionales: se ignoran.
 Las lineas que empiezan por '#' se ignoran.
 """
 
@@ -197,7 +198,9 @@ class SerialSource(FsrSource):
                 continue
 
             parts = text.split(",")
-            if len(parts) != expected:
+            # Acepta columnas extra al final (p. ej. los gramos del firmware);
+            # las posiciones de raw/mv no cambian.
+            if len(parts) < expected:
                 continue
             try:
                 int(parts[0])                       # ms del dispositivo
