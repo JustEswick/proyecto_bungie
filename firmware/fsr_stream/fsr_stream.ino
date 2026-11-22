@@ -8,9 +8,9 @@
                           |
                         GPIO (ADC)
 
-     R_FIXED = 1637 ohm (valor medio medido; S3 = 1633, S4 = 1641).
-     Es el valor por defecto de este montaje. Si usas otro, cambia
-     R_FIXED_OHMS mas abajo.
+     R_FIXED = 1.67 kohm (ejemplo: 10k || 2k = 1667 ohm nominal).
+     Mide tu resistencia real y pasala al PC con --r-fixed. Si quieres que
+     la cabecera lo refleje, cambia R_FIXED_OHMS mas abajo.
 
      Al presionar, R_FSR baja  ->  V_nodo SUBE.
      R_FSR = R_FIXED * (VCC - V_nodo) / V_nodo
@@ -26,41 +26,67 @@
      resistencias pull-up ni salidas digitales).
 
    SALIDA (115200 baudios, CSV plano, 25 Hz):
-       # ch0=S3 ch1=S4 r_fixed=1637.00 vcc=3.27 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.0
-       # ms,raw0,mv0,raw1,mv1
-       12345,1534,1234.5,1480,1190.2
+       # ch0=S3 ch1=S4 r_fixed=1667.00 vcc=3.30 topologia=fsr_to_vcc oversample=32 hz=25 fw=1.1 modelo=tabla_loglog
+       # ms,raw0,mv0,raw1,mv1,g0,g1
+       12345,1534,1234.5,1480,1190.2,0.0,0.0
        ...
 
      Las lineas que empiezan con '#' son metadatos/comentarios: el programa
      del PC las ignora. Si ves el CSV en el Monitor Serie, pon el baudrate
      correcto (115200) o veras caracteres basura.
 
-   POR QUE EL FIRMWARE NO CALCULA GRAMOS:
-     Calibrar exige probar decenas de combinaciones de modelo. Hacerlo en el
-     PC evita reflashear en cada iteracion. Cuando el modelo este elegido,
-     pc/fit.py genera calibration.h con los coeficientes para el ESP32.
+   MODELO DE GRAMOS (calibration.h, local):
+     pc/fit.py genera calibration.h con una tabla (log10 R, log10 g) por
+     canal. Ese archivo NO se versiona: cada usuario tiene la suya. Si existe,
+     el firmware interpola linealmente en log-log, exactamente igual que
+     pc/model.py, y anade g0,g1 al final del CSV. Si no existe, el sketch
+     compila igual y emite solo raw/mv. Fuerza EMIT_GRAMS 0 para volver al
+     formato de la version 1.0.
    ========================================================================== */
 
 // ---------------------------------------------------------------------------
 // 1. CONFIGURACION  (lo unico que deberias tocar)
 // ---------------------------------------------------------------------------
 
-#define FW_VERSION "1.0"
+#define FW_VERSION "1.1"
+
+// Tabla de calibracion generada por pc/fit.py. Es local: no se versiona.
+// Si el archivo existe se usa; si no, el sketch compila igual y emite solo
+// raw/mv. Tambien puedes forzar EMIT_GRAMS 0 para el CSV de la version 1.0.
+#if defined(__has_include)
+#  if __has_include("calibration.h")
+#    include "calibration.h"
+#    define HAVE_CAL_TABLE 1
+#  endif
+#endif
+#ifndef HAVE_CAL_TABLE
+#  define HAVE_CAL_TABLE 0
+#endif
+
+#ifndef EMIT_GRAMS
+#  define EMIT_GRAMS HAVE_CAL_TABLE
+#endif
+
+#if !HAVE_CAL_TABLE
+// Sin tabla no hay gramos, pero el stub mantiene el codigo compilable si
+// alguien fuerza EMIT_GRAMS 1.
+static inline float cal_grams(uint8_t, float) { return NAN; }
+#endif
 
 // Cuantos sensores y en que pines (orden = orden de las columnas del CSV)
 static const uint8_t N_CH = 2;
 static const uint8_t PIN_ADC[N_CH] = { 35, 34 };          // S3, S4
 static const char*   CH_NAME[N_CH] = { "S3", "S4" };
 
-// Resistencia fija del divisor, en ohmios. Valor medio medido en este
-// montaje: S3 = 1633 ohm (9.78k || 1.96k), S4 = 1641 ohm (9.83k || 1.97k).
-// Solo es informativo: la conversion real la hace el PC con --r-fixed.
-static const float R_FIXED_OHMS = 1637.0f;
+// Resistencia fija del divisor, en ohmios. Valor de ejemplo: 10k || 2k =
+// 1667 ohm nominales. Mide la tuya y pasala al PC con --r-fixed.
+// Solo es informativo: la conversion real la hace calibration.h (o el PC).
+static const float R_FIXED_OHMS = 1667.0f;
 
-// Voltaje real del riel de 3V3, medido con multimetro en este montaje.
-// OJO: no pongas 3.30 "porque si". Mide el pin 3V3 de la placa con el USB
-// conectado; de ahi depende el calculo de R.
-static const float VCC_VOLTS = 3.27f;
+// Voltaje nominal del riel de 3V3. Mide el tuyo con multimetro con el USB
+// conectado y pasalo al PC con --vcc; de ahi depende el calculo de R.
+// Solo es informativo: la conversion real la hace calibration.h (o el PC).
+static const float VCC_VOLTS = 3.30f;
 
 // Topologia del divisor:
 //   true  -> 3V3 -> FSR -> nodo -> R_FIXED -> GND     (V sube al presionar)
@@ -112,7 +138,13 @@ static void print_header() {
   Serial.print(F(" hz="));
   Serial.print(REPORT_HZ);
   Serial.print(F(" fw="));
-  Serial.println(F(FW_VERSION));
+  Serial.print(F(FW_VERSION));
+  Serial.print(F(" modelo="));
+#if HAVE_CAL_TABLE
+  Serial.println(F("tabla_loglog"));
+#else
+  Serial.println(F("sin_tabla"));
+#endif
 
   Serial.print(F("# ms"));
   for (uint8_t i = 0; i < N_CH; i++) {
@@ -121,6 +153,12 @@ static void print_header() {
     Serial.print(F(",mv"));
     Serial.print(i);
   }
+#if EMIT_GRAMS
+  for (uint8_t i = 0; i < N_CH; i++) {
+    Serial.print(F(",g"));
+    Serial.print(i);
+  }
+#endif
   Serial.println();
 }
 
@@ -212,6 +250,9 @@ void loop() {
   }
 
   // ---- linea CSV ----
+  // Formato: ms,raw0,mv0,raw1,mv1[,g0,g1]
+  // Los gramos van al final para que los parsers viejos (que esperan
+  // 1+2*N campos) sigan funcionando ignorando las columnas extra.
   Serial.print(millis());
   for (uint8_t i = 0; i < N_CH; i++) {
     Serial.print(',');
@@ -219,5 +260,16 @@ void loop() {
     Serial.print(',');
     Serial.print(ema_mv[i], 1);   // 1 decimal ~ 0.1 mV
   }
+#if EMIT_GRAMS
+  for (uint8_t i = 0; i < N_CH; i++) {
+    Serial.print(',');
+    const float g = cal_grams(i, ema_mv[i]);
+    if (isnan(g)) {
+      Serial.print(F("nan"));
+    } else {
+      Serial.print(g, 1);         // 1 decimal ~ 0.1 g
+    }
+  }
+#endif
   Serial.println();
 }
